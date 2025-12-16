@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.so
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Analysis output
+analysis/
+Analysis_Code/
+
+# OS
+.DS_Store
+
+# Testing
+tests/
+.pytest_cache/
+.coverage
+
+# Claude
+.claude/

@@ -15,7 +15,6 @@ venv/
 .idea/
 
 # Analysis output
-analysis/
 Analysis_Code/
 
 # OS

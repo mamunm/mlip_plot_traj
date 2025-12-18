@@ -11,7 +11,6 @@ find_package(pybind11 CONFIG REQUIRED)
 pybind11_add_module(_core MODULE
     src/cpp/src/density.cpp
     src/cpp/src/rdf.cpp
-    src/cpp/src/hbond.cpp
     src/cpp/src/diffusion.cpp
     src/cpp/bindings.cpp
 )

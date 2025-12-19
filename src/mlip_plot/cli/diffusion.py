@@ -385,7 +385,7 @@ def _export_msd_csv(msd_data: dict, output_file: str, use_region_analysis: bool 
             # Data rows
             for i in range(len(time)):
                 row = [f'{time[i]:.4f}']
-                for region in ['interface_a', 'interface_b', 'bulk']:
+                for region in ['interface_a', 'bulk', 'interface_b']:
                     if region in msd_data:
                         row.extend([
                             f'{msd_data[region]["planar"][1][i]:.6f}',
@@ -437,7 +437,7 @@ def _export_diffusion_csv(diffusion_results: dict, use_water_com: bool,
             header.extend(['r_squared', 'fit_start_ps', 'fit_end_ps', 'n_points'])
             writer.writerow(header)
 
-            for region_name in ['interface_a', 'interface_b', 'bulk']:
+            for region_name in ['interface_a', 'bulk', 'interface_b']:
                 if region_name in diffusion_results:
                     region_diff = diffusion_results[region_name]
                     for diff_type in ['planar', 'perpendicular', 'total']:

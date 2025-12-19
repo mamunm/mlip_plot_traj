@@ -410,7 +410,7 @@ def plot_msd_regions(
     output_file : str
         Path to saved figure
     """
-    region_order = ['interface_a', 'interface_b', 'bulk']
+    region_order = ['interface_a', 'bulk', 'interface_b']
     msd_types = ['planar', 'perpendicular', 'total']
 
     fig, axes = plt.subplots(3, 3, figsize=(14, 12))
@@ -539,7 +539,7 @@ def plot_diffusion_regions_summary(
     output_file : str
         Path to saved figure
     """
-    region_order = ['interface_a', 'interface_b', 'bulk']
+    region_order = ['interface_a', 'bulk', 'interface_b']
     msd_types = ['planar', 'total']  # Skip perpendicular (usually ~0)
 
     fig, ax = plt.subplots(figsize=(10, 6))

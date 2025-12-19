@@ -373,7 +373,7 @@ def _export_msd_csv(msd_data: dict, output_file: str, use_region_analysis: bool 
 
             # Header with all region columns
             header = ['time_ps']
-            for region in ['interface_a', 'interface_b', 'bulk']:
+            for region in ['interface_a', 'bulk', 'interface_b']:
                 if region in msd_data:
                     header.extend([
                         f'{region}_planar_A2',

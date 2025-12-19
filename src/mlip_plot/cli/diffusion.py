@@ -231,7 +231,7 @@ def diffusion(
             'total': 'Total (3D)'
         }
 
-        for region_name in ['interface_a', 'interface_b', 'bulk']:
+        for region_name in ['interface_a', 'bulk', 'interface_b']:
             if region_name in diffusion_results:
                 region_diff = diffusion_results[region_name]
                 z_range = regions[region_name]

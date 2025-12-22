@@ -552,6 +552,13 @@ def calculate_msd(
                 positions_list, box_lengths, regions,
                 unwrap_xy=True, unwrap_z=unwrap_z
             )
+            # Also compute global MSD
+            if verbose:
+                _log(logger, 'info', "Computing global MSD...")
+            global_msd_result = compute_msd(
+                positions_list, box_lengths,
+                unwrap_xy=True, unwrap_z=unwrap_z
+            )
         else:
             if verbose:
                 _log(logger, 'info', "Using Python backend for region analysis...")
@@ -566,6 +573,10 @@ def calculate_msd(
                 _log(logger, 'info', "Computing region-based MSD...")
             msd_result = _compute_msd_region_python(unwrapped, regions)
 
+            if verbose:
+                _log(logger, 'info', "Computing global MSD...")
+            global_msd_result = _compute_msd_python(unwrapped)
+
         # Format output with time arrays
         msd_data = {}
         for region_name in regions:
@@ -574,6 +585,12 @@ def calculate_msd(
                 'perpendicular': (time, msd_result[region_name]['perpendicular']),
                 'total': (time, msd_result[region_name]['total'])
             }
+        # Add global MSD
+        msd_data['global'] = {
+            'planar': (time, global_msd_result['planar']),
+            'perpendicular': (time, global_msd_result['perpendicular']),
+            'total': (time, global_msd_result['total'])
+        }
 
     else:
         # Standard analysis (use C++ if available)
@@ -805,6 +822,7 @@ def compute_diffusion(
 
         block_diff = {}
         if use_region_analysis:
+            # Fit for each region
             for region_name in regions:
                 block_diff[region_name] = {}
                 for diff_type, dim in [('planar', 2), ('perpendicular', 1), ('total', 3)]:
@@ -815,6 +833,16 @@ def compute_diffusion(
                         fit_start_ps=fit_start_ps, fit_end_ps=fit_end_ps,
                         dimensionality=dim, verbose=False
                     )
+            # Also fit global
+            block_diff['global'] = {}
+            for diff_type, dim in [('planar', 2), ('perpendicular', 1), ('total', 3)]:
+                time, msd = block_msd['global'][diff_type]
+                block_diff['global'][diff_type] = fit_diffusion_coefficient(
+                    time, msd,
+                    fit_start_frac=fit_start_frac, fit_end_frac=fit_end_frac,
+                    fit_start_ps=fit_start_ps, fit_end_ps=fit_end_ps,
+                    dimensionality=dim, verbose=False
+                )
         else:
             for diff_type, dim in [('planar', 2), ('perpendicular', 1), ('total', 3)]:
                 time, msd = block_msd[diff_type]
@@ -885,6 +913,37 @@ def compute_diffusion(
                     result['D_blocks'] = D_values.tolist()
 
                 diffusion_results[region_name][diff_type] = result
+
+        # Also fit global (whole system) diffusion
+        diffusion_results['global'] = {}
+        global_msd = msd_data['global']
+
+        if verbose:
+            _log(logger, 'section', "Region: Global (Whole System)")
+
+        for diff_type, dim, label in [
+            ('planar', 2, 'Planar (x-y)'),
+            ('perpendicular', 1, 'Perpendicular (z)'),
+            ('total', 3, 'Total (3D)')
+        ]:
+            time, msd = global_msd[diff_type]
+            if verbose:
+                _log(logger, 'info', f"{label} Diffusion")
+            result = fit_diffusion_coefficient(
+                time, msd,
+                fit_start_frac=fit_start_frac, fit_end_frac=fit_end_frac,
+                fit_start_ps=fit_start_ps, fit_end_ps=fit_end_ps,
+                dimensionality=dim, verbose=verbose, logger=logger
+            )
+
+            # Add block statistics if available
+            if n_blocks > 1:
+                D_values = np.array([br['global'][diff_type]['D_A2ps'] for br in block_results])
+                result['D_mean'] = np.mean(D_values)
+                result['D_std'] = np.std(D_values, ddof=1)  # Sample std
+                result['D_blocks'] = D_values.tolist()
+
+            diffusion_results['global'][diff_type] = result
 
     else:
         # Standard analysis (no regions)

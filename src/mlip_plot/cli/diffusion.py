@@ -223,7 +223,8 @@ def diffusion(
         region_labels = {
             'interface_a': 'Interface A (Lower)',
             'interface_b': 'Interface B (Upper)',
-            'bulk': 'Bulk (Central)'
+            'bulk': 'Bulk (Central)',
+            'global': 'Global (Whole System)'
         }
         type_labels = {
             'planar': 'Planar (x-y)',
@@ -231,14 +232,19 @@ def diffusion(
             'total': 'Total (3D)'
         }
 
-        for region_name in ['interface_a', 'bulk', 'interface_b']:
+        for region_name in ['interface_a', 'bulk', 'interface_b', 'global']:
             if region_name in diffusion_results:
                 region_diff = diffusion_results[region_name]
-                z_range = regions[region_name]
 
-                results_tbl = logger.results_table(
-                    f"Diffusion: {region_labels[region_name]} ({z_range[0]:.1f}-{z_range[1]:.1f} A)"
-                )
+                # Global doesn't have z_range in regions dict
+                if region_name == 'global':
+                    box = frames[0]['box']
+                    title = f"Diffusion: {region_labels[region_name]} ({box['zlo']:.1f}-{box['zhi']:.1f} A)"
+                else:
+                    z_range = regions[region_name]
+                    title = f"Diffusion: {region_labels[region_name]} ({z_range[0]:.1f}-{z_range[1]:.1f} A)"
+
+                results_tbl = logger.results_table(title)
                 results_tbl.add_column("Type", style="cyan")
                 if use_blocks:
                     results_tbl.add_column("D (A^2/ps)", justify="right")
@@ -373,7 +379,7 @@ def _export_msd_csv(msd_data: dict, output_file: str, use_region_analysis: bool 
 
             # Header with all region columns
             header = ['time_ps']
-            for region in ['interface_a', 'bulk', 'interface_b']:
+            for region in ['interface_a', 'bulk', 'interface_b', 'global']:
                 if region in msd_data:
                     header.extend([
                         f'{region}_planar_A2',
@@ -385,7 +391,7 @@ def _export_msd_csv(msd_data: dict, output_file: str, use_region_analysis: bool 
             # Data rows
             for i in range(len(time)):
                 row = [f'{time[i]:.4f}']
-                for region in ['interface_a', 'bulk', 'interface_b']:
+                for region in ['interface_a', 'bulk', 'interface_b', 'global']:
                     if region in msd_data:
                         row.extend([
                             f'{msd_data[region]["planar"][1][i]:.6f}',
@@ -437,7 +443,7 @@ def _export_diffusion_csv(diffusion_results: dict, use_water_com: bool,
             header.extend(['r_squared', 'fit_start_ps', 'fit_end_ps', 'n_points'])
             writer.writerow(header)
 
-            for region_name in ['interface_a', 'bulk', 'interface_b']:
+            for region_name in ['interface_a', 'bulk', 'interface_b', 'global']:
                 if region_name in diffusion_results:
                     region_diff = diffusion_results[region_name]
                     for diff_type in ['planar', 'perpendicular', 'total']:

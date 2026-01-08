@@ -183,11 +183,51 @@ def filter_atoms_by_element(
     return positions_list, atom_ids
 
 
+SUPPORTED_METALS = {'Cu', 'Pt'}
+
+
+def find_metal_surface_z(frames: List[Dict]) -> Tuple[float, Set[str]]:
+    """
+    Find the maximum z-coordinate of metal atoms (top of metal surface).
+
+    Automatically detects Cu or Pt atoms in the system.
+
+    Parameters
+    ----------
+    frames : list
+        List of trajectory frames
+
+    Returns
+    -------
+    max_z : float
+        Maximum z-coordinate of metal atoms
+    found_metals : set
+        Set of metal elements found (subset of {'Cu', 'Pt'})
+    """
+    if frames[0]['elements'] is None:
+        raise ValueError("Frames must contain element information")
+
+    elements = frames[0]['elements']
+    positions = frames[0]['positions']
+
+    # Find metal atoms (Cu or Pt)
+    metal_mask = np.isin(elements, list(SUPPORTED_METALS))
+    if not np.any(metal_mask):
+        raise ValueError(f"No metal atoms found. Looking for: {SUPPORTED_METALS}")
+
+    # Determine which metals were found
+    found_metals = set(elements[metal_mask])
+
+    metal_z = positions[metal_mask, 2]
+    return np.max(metal_z), found_metals
+
+
 def define_z_regions(
     z_lo: float,
     z_hi: float,
     z_interface: float,
-    d_bulk: float
+    d_bulk: float,
+    metal_surface_z: Optional[float] = None
 ) -> Dict[str, Tuple[float, float]]:
     """
     Define three z-regions for region-based diffusion analysis.
@@ -202,6 +242,9 @@ def define_z_regions(
         Thickness of interfacial region from each surface
     d_bulk : float
         Half-width of bulk region around midpoint
+    metal_surface_z : float, optional
+        Top of metal surface (max z of metal atoms). If provided,
+        interface_a starts from this z-coordinate instead of z_lo.
 
     Returns
     -------
@@ -212,8 +255,14 @@ def define_z_regions(
     z_length = z_hi - z_lo
     midpoint = z_lo + z_length / 2.0
 
+    # Interface A: starts from metal surface top if provided, otherwise from z_lo
+    if metal_surface_z is not None:
+        interface_a_start = metal_surface_z
+    else:
+        interface_a_start = z_lo
+
     return {
-        'interface_a': (z_lo, z_lo + z_interface),
+        'interface_a': (interface_a_start, interface_a_start + z_interface),
         'interface_b': (z_hi - z_interface, z_hi),
         'bulk': (midpoint - d_bulk, midpoint + d_bulk),
     }
@@ -464,6 +513,8 @@ def calculate_msd(
     d_bulk : float, optional
         Half-width of bulk region around midpoint (Angstroms).
         Must be provided together with z_interface for region analysis.
+        When region analysis is enabled, Cu or Pt atoms are automatically
+        detected and interface_a starts from the top of the metal surface.
     unwrap_z : bool
         Whether to unwrap z coordinates (default: False)
     verbose : bool
@@ -497,7 +548,12 @@ def calculate_msd(
     # Define regions if region analysis is enabled
     regions = None
     if use_region_analysis:
-        regions = define_z_regions(z_lo, z_hi, z_interface, d_bulk)
+        # Find metal surface z (auto-detects Cu or Pt)
+        metal_surface_z, found_metals = find_metal_surface_z(frames)
+        if verbose:
+            _log(logger, 'info', f"Metal surface top at z = {metal_surface_z:.2f} A (detected: {found_metals})")
+
+        regions = define_z_regions(z_lo, z_hi, z_interface, d_bulk, metal_surface_z)
         if verbose:
             _log(logger, 'info', "Region-based analysis enabled")
             for region_name, (rz_min, rz_max) in regions.items():
@@ -759,6 +815,8 @@ def compute_diffusion(
     d_bulk : float, optional
         Half-width of bulk region around midpoint (Angstroms).
         Must be provided together with z_interface for region analysis.
+        When region analysis is enabled, Cu or Pt atoms are automatically
+        detected and interface_a starts from the top of the metal surface.
     fit_start_frac : float
         Starting fraction of time range for fitting (default: 0.2)
     fit_end_frac : float

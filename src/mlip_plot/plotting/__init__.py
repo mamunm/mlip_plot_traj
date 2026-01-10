@@ -10,6 +10,12 @@ from .diffusion import (
     plot_msd_regions,
     plot_diffusion_regions_summary,
 )
+from .hbond import (
+    plot_hbond_time_series,
+    plot_nhbond_distribution,
+    plot_hbond_geometry,
+    plot_hbond_regions_summary,
+)
 from .styles import ELEMENT_COLORS, TRAJECTORY_COLORS, LINE_STYLES
 
 __all__ = [
@@ -23,6 +29,10 @@ __all__ = [
     "plot_diffusion_summary",
     "plot_msd_regions",
     "plot_diffusion_regions_summary",
+    "plot_hbond_time_series",
+    "plot_nhbond_distribution",
+    "plot_hbond_geometry",
+    "plot_hbond_regions_summary",
     "ELEMENT_COLORS",
     "TRAJECTORY_COLORS",
     "LINE_STYLES",

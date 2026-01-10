@@ -9,6 +9,10 @@ from .diffusion import (
     find_water_molecules,
     compute_water_com_positions,
 )
+from .hbond import (
+    detect_hbonds_frame,
+    compute_hbond_analysis,
+)
 from .statistics import (
     # Error estimation
     ErrorEstimationResult,
@@ -45,6 +49,9 @@ __all__ = [
     "fit_diffusion_coefficient",
     "find_water_molecules",
     "compute_water_com_positions",
+    # H-bond
+    "detect_hbonds_frame",
+    "compute_hbond_analysis",
     # Statistics - Error estimation
     "ErrorEstimationResult",
     "compute_autocorrelation",

@@ -6,6 +6,7 @@ from .describe import describe
 from .density import density
 from .rdf import rdf
 from .diffusion import diffusion
+from .hbond import hbond
 
 
 @click.group()
@@ -20,6 +21,7 @@ def main():
       density    Calculate and plot density profiles along an axis
       rdf        Calculate and plot radial distribution functions
       diffusion  Calculate diffusion coefficients from MSD
+      hbond      Analyze hydrogen bonds in water molecules
 
     \b
     Examples:
@@ -27,6 +29,7 @@ def main():
       mlip-plot density trajectory.lammpstrj
       mlip-plot rdf trajectory.lammpstrj -p O-O -p O-H
       mlip-plot diffusion trajectory.lammpstrj --dt 2.0
+      mlip-plot hbond trajectory.lammpstrj --d-a-cutoff 3.5
 
     \b
     Use 'mlip-plot <command> --help' for more information on a command.
@@ -39,6 +42,7 @@ main.add_command(describe)
 main.add_command(density)
 main.add_command(rdf)
 main.add_command(diffusion)
+main.add_command(hbond)
 
 
 if __name__ == '__main__':

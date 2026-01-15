@@ -87,7 +87,8 @@ def hbond(
         plot_hbond_time_series,
         plot_nhbond_distribution,
         plot_hbond_geometry,
-        plot_hbond_regions_summary
+        plot_hbond_regions_summary,
+        plot_hbond_z_profile
     )
 
     # Fixed save folder for hbond analysis
@@ -318,6 +319,15 @@ def hbond(
             show=show, verbose=False
         )
         logger.success(f"Saved: [bold]{output_file}[/bold]")
+
+    # 6. Z-profile plot
+    output_file = f"{output_prefix}_z_profile.png"
+    plot_hbond_z_profile(
+        results, output_file=output_file,
+        show_regions=use_region_analysis,
+        show=show, verbose=False
+    )
+    logger.success(f"Saved: [bold]{output_file}[/bold]")
 
     # Export CSV
     logger.section("Exporting CSV")

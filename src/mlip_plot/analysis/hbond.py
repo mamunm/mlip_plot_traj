@@ -14,6 +14,7 @@ import numpy as np
 
 from .diffusion import (
     find_metal_surface_z,
+    find_metal_surfaces,
     define_z_regions,
     get_atoms_in_region,
     SUPPORTED_METALS,
@@ -73,7 +74,8 @@ def _sort_frame_by_atom_id(frame: Dict) -> Dict:
     return sorted_frame
 
 
-def _apply_minimum_image(diff: np.ndarray, box_lengths: Tuple[float, float, float]) -> np.ndarray:
+def _apply_minimum_image(diff: np.ndarray, box_lengths: Tuple[float, float, float],
+                         pbc_dims: Tuple[bool, bool, bool] = (True, True, True)) -> np.ndarray:
     """
     Apply minimum image convention for periodic boundary conditions.
 
@@ -83,6 +85,9 @@ def _apply_minimum_image(diff: np.ndarray, box_lengths: Tuple[float, float, floa
         Displacement vectors, shape (..., 3)
     box_lengths : tuple
         (Lx, Ly, Lz) box dimensions
+    pbc_dims : tuple of bool
+        Which dimensions have PBC (default: all True for bulk water).
+        For metal/water interface: use (True, True, False) to exclude z.
 
     Returns
     -------
@@ -90,13 +95,22 @@ def _apply_minimum_image(diff: np.ndarray, box_lengths: Tuple[float, float, floa
         Displacement vectors with minimum image convention applied
     """
     box = np.array(box_lengths)
-    # Shift to range [-L/2, L/2]
-    diff_mic = diff - box * np.round(diff / box)
+    pbc_mask = np.array(pbc_dims, dtype=bool)
+
+    # Make a copy to avoid modifying input
+    diff_mic = diff.copy()
+
+    # Apply PBC correction only to specified dimensions
+    for dim in range(3):
+        if pbc_mask[dim]:
+            diff_mic[..., dim] = diff[..., dim] - box[dim] * np.round(diff[..., dim] / box[dim])
+
     return diff_mic
 
 
 def find_water_molecules_pbc(
     frame: Dict,
+    pbc_dims: Tuple[bool, bool, bool] = (True, True, True),
 ) -> List[Tuple[int, int, int]]:
     """
     Find water molecules by assigning the 2 closest H atoms to each O atom.
@@ -109,6 +123,9 @@ def find_water_molecules_pbc(
     ----------
     frame : dict
         Single frame with 'positions', 'elements', 'box'
+    pbc_dims : tuple of bool
+        Which dimensions have PBC (default: all True for bulk water).
+        For metal/water interface: use (True, True, False) to exclude z.
 
     Returns
     -------
@@ -148,7 +165,7 @@ def find_water_molecules_pbc(
 
         # Compute distances to all H atoms with PBC
         diff = h_positions - o_pos  # shape (n_H, 3)
-        diff_mic = _apply_minimum_image(diff, box_lengths)
+        diff_mic = _apply_minimum_image(diff, box_lengths, pbc_dims)
         distances = np.linalg.norm(diff_mic, axis=1)
 
         # Find 2 closest H atoms that haven't been used
@@ -175,7 +192,8 @@ def detect_hbonds_frame(
     water_molecules: List[Tuple[int, int, int]],
     box_lengths: Tuple[float, float, float],
     d_a_cutoff: float = 3.5,
-    d_h_a_angle_cutoff: float = 120.0
+    d_h_a_angle_cutoff: float = 120.0,
+    pbc_dims: Tuple[bool, bool, bool] = (True, True, True)
 ) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Detect hydrogen bonds in a single frame with PBC.
@@ -196,6 +214,9 @@ def detect_hbonds_frame(
         Maximum donor-acceptor distance (default: 3.5 A)
     d_h_a_angle_cutoff : float
         Minimum D-H-A angle in degrees (default: 120)
+    pbc_dims : tuple of bool
+        Which dimensions have PBC (default: all True for bulk water).
+        For metal/water interface: use (True, True, False) to exclude z.
 
     Returns
     -------
@@ -223,7 +244,7 @@ def detect_hbonds_frame(
 
     # Compute all O-O distances with PBC (vectorized)
     diff = o_positions[:, np.newaxis, :] - o_positions[np.newaxis, :, :]
-    diff_mic = _apply_minimum_image(diff, box_lengths)
+    diff_mic = _apply_minimum_image(diff, box_lengths, pbc_dims)
     dist_matrix = np.sqrt(np.sum(diff_mic**2, axis=2))
 
     # Exclude self-pairs
@@ -249,8 +270,8 @@ def detect_hbonds_frame(
             h_pos = positions[h_idx]
 
             # Compute D-H-A angle (angle at H between D and A) with PBC
-            vec_hd = _apply_minimum_image(donor_pos - h_pos, box_lengths)      # H -> D vector
-            vec_ha = _apply_minimum_image(acceptor_pos - h_pos, box_lengths)   # H -> A vector
+            vec_hd = _apply_minimum_image(donor_pos - h_pos, box_lengths, pbc_dims)      # H -> D vector
+            vec_ha = _apply_minimum_image(acceptor_pos - h_pos, box_lengths, pbc_dims)   # H -> A vector
 
             # Normalize
             norm_hd = np.linalg.norm(vec_hd)
@@ -293,16 +314,16 @@ def detect_hbonds_region_frame(
     box_lengths: Tuple[float, float, float],
     regions: Dict[str, Tuple[float, float]],
     d_a_cutoff: float = 3.5,
-    d_h_a_angle_cutoff: float = 120.0
+    d_h_a_angle_cutoff: float = 120.0,
+    pbc_dims: Tuple[bool, bool, bool] = (True, True, True)
 ) -> Dict[str, Tuple[int, int]]:
     """
     Detect H-bonds with region attribution.
 
     Region Attribution Rule:
-    - An H-bond is counted in a region if EITHER the donor OR acceptor
-      oxygen is within that region's z-bounds.
-    - Same H-bond can be counted in multiple regions if donor and acceptor
-      are in different regions.
+    - An H-bond is counted in a region if BOTH the donor AND acceptor
+      oxygen are within that region's z-bounds.
+    - This measures H-bond density within each region for fair comparison.
 
     Parameters
     ----------
@@ -318,6 +339,9 @@ def detect_hbonds_region_frame(
         Maximum donor-acceptor distance (default: 3.5 A)
     d_h_a_angle_cutoff : float
         Minimum D-H-A angle in degrees (default: 120)
+    pbc_dims : tuple of bool
+        Which dimensions have PBC (default: all True for bulk water).
+        For metal/water interface: use (True, True, False) to exclude z.
 
     Returns
     -------
@@ -327,7 +351,7 @@ def detect_hbonds_region_frame(
     """
     # First detect all H-bonds globally
     n_hbonds, donor_indices, h_indices, acceptor_indices, distances, angles = \
-        detect_hbonds_frame(positions, water_molecules, box_lengths, d_a_cutoff, d_h_a_angle_cutoff)
+        detect_hbonds_frame(positions, water_molecules, box_lengths, d_a_cutoff, d_h_a_angle_cutoff, pbc_dims)
 
     # Get oxygen indices and positions
     o_indices = np.array([mol[0] for mol in water_molecules])
@@ -338,7 +362,7 @@ def detect_hbonds_region_frame(
         'global': (n_hbonds, n_water_total)
     }
 
-    # For each region, count H-bonds where either donor or acceptor is in region
+    # For each region, count H-bonds where BOTH donor and acceptor are in region
     for region_name, (z_min, z_max) in regions.items():
         # Find waters in this region (based on O position)
         o_z = o_positions[:, 2]
@@ -350,7 +374,7 @@ def detect_hbonds_region_frame(
         o_idx_to_water_idx = {mol[0]: i for i, mol in enumerate(water_molecules)}
 
         if n_hbonds > 0:
-            # Count H-bonds where either donor or acceptor is in region
+            # Count H-bonds where BOTH donor and acceptor are in region
             region_hbond_count = 0
             for d_idx, a_idx in zip(donor_indices, acceptor_indices):
                 d_water_idx = o_idx_to_water_idx.get(d_idx)
@@ -359,8 +383,8 @@ def detect_hbonds_region_frame(
                 if d_water_idx is not None and a_water_idx is not None:
                     donor_in_region = in_region_mask[d_water_idx]
                     acceptor_in_region = in_region_mask[a_water_idx]
-                    # Count if EITHER is in region
-                    if donor_in_region or acceptor_in_region:
+                    # Count if BOTH are in region (measures H-bond density within region)
+                    if donor_in_region and acceptor_in_region:
                         region_hbond_count += 1
 
             results[region_name] = (region_hbond_count, int(n_water_in_region))
@@ -408,6 +432,123 @@ def _compute_block_statistics(
     std_error = np.std(block_means, ddof=1) / np.sqrt(n_blocks)
 
     return mean, std_error
+
+
+def compute_hbond_z_profile(
+    frames: List[Dict],
+    water_molecules: List[Tuple[int, int, int]],
+    pbc_dims: Tuple[bool, bool, bool],
+    d_a_cutoff: float = 3.5,
+    d_h_a_angle_cutoff: float = 120.0,
+    n_bins: int = 50,
+    z_range: Optional[Tuple[float, float]] = None
+) -> Dict[str, np.ndarray]:
+    """
+    Compute H-bond profile as function of z-coordinate.
+
+    For each water molecule, count the total number of H-bonds it participates in
+    (as donor or acceptor). Then bin by z-coordinate of the oxygen atom.
+
+    Parameters
+    ----------
+    frames : list
+        Trajectory frames
+    water_molecules : list of tuple
+        List of (O_idx, H1_idx, H2_idx) tuples
+    pbc_dims : tuple of bool
+        Which dimensions have PBC
+    d_a_cutoff : float
+        D-A distance cutoff
+    d_h_a_angle_cutoff : float
+        D-H-A angle cutoff in degrees
+    n_bins : int
+        Number of z-bins (default: 50)
+    z_range : tuple, optional
+        (z_min, z_max) for binning. If None, uses water z-extent.
+
+    Returns
+    -------
+    profile : dict
+        {
+            'z_centers': bin centers (n_bins,),
+            'nhbond_mean': mean <nhbond> per bin (n_bins,),
+            'nhbond_std': std per bin (n_bins,),
+            'n_samples': number of water samples per bin (n_bins,)
+        }
+    """
+    # Collect (z_coord, nhbond_count) for all waters across all frames
+    z_coords = []
+    nhbond_counts = []
+
+    # Create mapping from O index to water index
+    o_idx_to_water_idx = {mol[0]: i for i, mol in enumerate(water_molecules)}
+    n_water = len(water_molecules)
+
+    for frame in frames:
+        positions = frame['positions']
+        box = frame['box']
+        box_lengths = (
+            box['xhi'] - box['xlo'],
+            box['yhi'] - box['ylo'],
+            box['zhi'] - box['zlo']
+        )
+
+        # Detect all H-bonds in this frame
+        n_hbonds, donor_indices, h_indices, acceptor_indices, distances, angles = \
+            detect_hbonds_frame(positions, water_molecules, box_lengths,
+                               d_a_cutoff, d_h_a_angle_cutoff, pbc_dims)
+
+        # Count H-bonds per water molecule (as donor OR acceptor)
+        hbond_count_per_water = np.zeros(n_water, dtype=int)
+
+        for d_idx, a_idx in zip(donor_indices, acceptor_indices):
+            d_water_idx = o_idx_to_water_idx.get(d_idx)
+            a_water_idx = o_idx_to_water_idx.get(a_idx)
+            if d_water_idx is not None:
+                hbond_count_per_water[d_water_idx] += 1
+            if a_water_idx is not None:
+                hbond_count_per_water[a_water_idx] += 1
+
+        # Record z-coordinate and H-bond count for each water
+        for w_idx, (o_idx, _, _) in enumerate(water_molecules):
+            z = positions[o_idx, 2]
+            z_coords.append(z)
+            nhbond_counts.append(hbond_count_per_water[w_idx])
+
+    z_coords = np.array(z_coords)
+    nhbond_counts = np.array(nhbond_counts)
+
+    # Determine z-range for binning
+    if z_range is None:
+        z_min, z_max = z_coords.min(), z_coords.max()
+    else:
+        z_min, z_max = z_range
+
+    # Create bins and compute statistics
+    bin_edges = np.linspace(z_min, z_max, n_bins + 1)
+    z_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+    nhbond_mean = np.zeros(n_bins)
+    nhbond_std = np.zeros(n_bins)
+    n_samples = np.zeros(n_bins, dtype=int)
+
+    for i in range(n_bins):
+        mask = (z_coords >= bin_edges[i]) & (z_coords < bin_edges[i + 1])
+        if i == n_bins - 1:  # Include right edge in last bin
+            mask = (z_coords >= bin_edges[i]) & (z_coords <= bin_edges[i + 1])
+
+        n_samples[i] = np.sum(mask)
+        if n_samples[i] > 0:
+            nhbond_mean[i] = np.mean(nhbond_counts[mask])
+            nhbond_std[i] = np.std(nhbond_counts[mask])
+
+    return {
+        'z_centers': z_centers,
+        'nhbond_mean': nhbond_mean,
+        'nhbond_std': nhbond_std,
+        'n_samples': n_samples,
+        'z_range': (z_min, z_max)
+    }
 
 
 def compute_hbond_analysis(
@@ -494,10 +635,35 @@ def compute_hbond_analysis(
     _log(logger, 'info', "Sorting frames by atom ID...", verbose)
     sorted_frames = [_sort_frame_by_atom_id(f) for f in frames]
 
+    # Detect metal surfaces to determine PBC dimensions
+    # For metal/water interface: apply PBC only in x,y (not z)
+    # For bulk water (no metal): apply PBC in all 3 dimensions
+    try:
+        lower_metal_z, upper_metal_z, found_metals = find_metal_surfaces(sorted_frames)
+        has_metal = True
+        pbc_dims = (True, True, False)  # No PBC in z for metal/water interface
+        metal_surface_z = lower_metal_z  # For backwards compatibility
+        if upper_metal_z is not None:
+            _log(logger, 'detail',
+                 f"Metal surfaces detected: lower={lower_metal_z:.2f} A, upper={upper_metal_z:.2f} A ({', '.join(found_metals)})",
+                 verbose)
+        else:
+            _log(logger, 'detail',
+                 f"Metal surface detected at z = {lower_metal_z:.2f} A ({', '.join(found_metals)})",
+                 verbose)
+        _log(logger, 'detail', "Using PBC in x,y only (metal/water interface)", verbose)
+    except ValueError:
+        has_metal = False
+        metal_surface_z = None
+        lower_metal_z = None
+        upper_metal_z = None
+        pbc_dims = (True, True, True)  # Full PBC for bulk water
+        _log(logger, 'detail', "No metal surface found, using full PBC (bulk water)", verbose)
+
     # Find water molecules using PBC-aware detection (from first frame)
     # Uses closest 2 H atoms per O with minimum image convention
     _log(logger, 'info', "Finding water molecules...", verbose)
-    water_molecules = find_water_molecules_pbc(sorted_frames[0])
+    water_molecules = find_water_molecules_pbc(sorted_frames[0], pbc_dims=pbc_dims)
     n_water = len(water_molecules)
     _log(logger, 'success', f"Found {n_water} water molecules", verbose)
 
@@ -509,18 +675,10 @@ def compute_hbond_analysis(
         box = sorted_frames[0]['box']
         z_lo, z_hi = box['zlo'], box['zhi']
 
-        # Try to find metal surface
-        try:
-            metal_surface_z, found_metals = find_metal_surface_z(sorted_frames)
-            _log(logger, 'detail',
-                 f"Metal surface detected at z = {metal_surface_z:.2f} A ({', '.join(found_metals)})",
-                 verbose)
-        except ValueError:
-            metal_surface_z = None
-            _log(logger, 'detail', "No metal surface found, using box boundaries", verbose)
-
-        regions = define_z_regions(z_lo, z_hi, z_interface, d_bulk, metal_surface_z)
+        regions = define_z_regions(z_lo, z_hi, z_interface, d_bulk, lower_metal_z, upper_metal_z)
         _log(logger, 'detail', f"Regions defined: {list(regions.keys())}", verbose)
+        for rname, (rmin, rmax) in regions.items():
+            _log(logger, 'detail', f"  {rname}: {rmin:.1f} - {rmax:.1f} A", verbose)
 
     # Initialize time series storage
     n_frames = len(sorted_frames)
@@ -561,7 +719,7 @@ def compute_hbond_analysis(
             # Region-aware detection
             region_results = detect_hbonds_region_frame(
                 positions, water_molecules, box_lengths, regions,
-                d_a_cutoff, d_h_a_angle_cutoff
+                d_a_cutoff, d_h_a_angle_cutoff, pbc_dims
             )
 
             for rname in region_names:
@@ -577,7 +735,7 @@ def compute_hbond_analysis(
 
             # Also get geometry data from global detection
             n_hbonds, _, _, _, distances, angles = detect_hbonds_frame(
-                positions, water_molecules, box_lengths, d_a_cutoff, d_h_a_angle_cutoff
+                positions, water_molecules, box_lengths, d_a_cutoff, d_h_a_angle_cutoff, pbc_dims
             )
             if len(distances) > 0:
                 all_distances.extend(distances.tolist())
@@ -585,7 +743,7 @@ def compute_hbond_analysis(
         else:
             # Global-only detection
             n_hbonds, _, _, _, distances, angles = detect_hbonds_frame(
-                positions, water_molecules, box_lengths, d_a_cutoff, d_h_a_angle_cutoff
+                positions, water_molecules, box_lengths, d_a_cutoff, d_h_a_angle_cutoff, pbc_dims
             )
 
             time_series['global']['n_hbonds'][frame_idx] = n_hbonds
@@ -621,6 +779,14 @@ def compute_hbond_analysis(
             'n_water': int(avg_n_water),
         }
 
+    # Compute z-profile
+    _log(logger, 'info', "Computing z-profile...", verbose)
+    z_profile = compute_hbond_z_profile(
+        sorted_frames, water_molecules, pbc_dims,
+        d_a_cutoff, d_h_a_angle_cutoff,
+        n_bins=50
+    )
+
     _log(logger, 'success', f"H-bond analysis complete", verbose)
 
     return {
@@ -630,11 +796,13 @@ def compute_hbond_analysis(
             'distances': np.array(all_distances),
             'angles': np.array(all_angles),
         },
+        'z_profile': z_profile,
         'n_water': n_water,
         'n_frames': n_frames,
         'regions': regions,
         'parameters': {
             'd_a_cutoff': d_a_cutoff,
             'd_h_a_angle_cutoff': d_h_a_angle_cutoff,
-        }
+        },
+        'metal_surface_z': metal_surface_z if has_metal else None,
     }

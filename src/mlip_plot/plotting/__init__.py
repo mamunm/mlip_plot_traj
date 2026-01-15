@@ -15,6 +15,7 @@ from .hbond import (
     plot_nhbond_distribution,
     plot_hbond_geometry,
     plot_hbond_regions_summary,
+    plot_hbond_z_profile,
 )
 from .styles import ELEMENT_COLORS, TRAJECTORY_COLORS, LINE_STYLES
 
@@ -33,6 +34,7 @@ __all__ = [
     "plot_nhbond_distribution",
     "plot_hbond_geometry",
     "plot_hbond_regions_summary",
+    "plot_hbond_z_profile",
     "ELEMENT_COLORS",
     "TRAJECTORY_COLORS",
     "LINE_STYLES",

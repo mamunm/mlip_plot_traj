@@ -222,12 +222,71 @@ def find_metal_surface_z(frames: List[Dict]) -> Tuple[float, Set[str]]:
     return np.max(metal_z), found_metals
 
 
+def find_metal_surfaces(frames: List[Dict]) -> Tuple[Optional[float], Optional[float], Set[str]]:
+    """
+    Find both lower and upper metal surfaces in a metal/water/metal sandwich.
+
+    Detects if there are two separate metal slabs by looking for a gap in
+    the z-distribution of metal atoms. Returns the top of the lower slab
+    and bottom of the upper slab.
+
+    Parameters
+    ----------
+    frames : list
+        List of trajectory frames
+
+    Returns
+    -------
+    lower_surface_z : float or None
+        Top z-coordinate of lower metal slab (where water starts)
+    upper_surface_z : float or None
+        Bottom z-coordinate of upper metal slab (where water ends)
+    found_metals : set
+        Set of metal elements found
+    """
+    if frames[0]['elements'] is None:
+        raise ValueError("Frames must contain element information")
+
+    elements = frames[0]['elements']
+    positions = frames[0]['positions']
+
+    # Find metal atoms
+    metal_mask = np.isin(elements, list(SUPPORTED_METALS))
+    if not np.any(metal_mask):
+        raise ValueError(f"No metal atoms found. Looking for: {SUPPORTED_METALS}")
+
+    found_metals = set(elements[metal_mask])
+    metal_z = positions[metal_mask, 2]
+
+    # Sort metal z-coordinates
+    metal_z_sorted = np.sort(metal_z)
+
+    # Find the largest gap in z (this separates lower and upper slabs)
+    z_diffs = np.diff(metal_z_sorted)
+    max_gap_idx = np.argmax(z_diffs)
+    max_gap = z_diffs[max_gap_idx]
+
+    # Check if there's a significant gap (> 5 Angstrom suggests two slabs)
+    # Typical metal layer spacing is ~2-3 A, so gap > 5 A indicates water region
+    if max_gap > 5.0:
+        # Two metal slabs detected
+        lower_surface_z = metal_z_sorted[max_gap_idx]      # Top of lower slab
+        upper_surface_z = metal_z_sorted[max_gap_idx + 1]  # Bottom of upper slab
+    else:
+        # Single metal slab - use max z as before
+        lower_surface_z = np.max(metal_z)
+        upper_surface_z = None
+
+    return lower_surface_z, upper_surface_z, found_metals
+
+
 def define_z_regions(
     z_lo: float,
     z_hi: float,
     z_interface: float,
     d_bulk: float,
-    metal_surface_z: Optional[float] = None
+    metal_surface_z: Optional[float] = None,
+    upper_metal_surface_z: Optional[float] = None
 ) -> Dict[str, Tuple[float, float]]:
     """
     Define three z-regions for region-based diffusion analysis.
@@ -243,8 +302,11 @@ def define_z_regions(
     d_bulk : float
         Half-width of bulk region around midpoint
     metal_surface_z : float, optional
-        Top of metal surface (max z of metal atoms). If provided,
+        Top of LOWER metal surface. If provided,
         interface_a starts from this z-coordinate instead of z_lo.
+    upper_metal_surface_z : float, optional
+        Bottom of UPPER metal surface. If provided,
+        interface_b ends at this z-coordinate instead of z_hi.
 
     Returns
     -------
@@ -252,18 +314,26 @@ def define_z_regions(
         Dictionary with keys 'interface_a', 'interface_b', 'bulk',
         each mapping to (z_min, z_max) tuple
     """
-    z_length = z_hi - z_lo
-    midpoint = z_lo + z_length / 2.0
-
-    # Interface A: starts from metal surface top if provided, otherwise from z_lo
+    # Interface A: starts from lower metal surface top if provided
     if metal_surface_z is not None:
         interface_a_start = metal_surface_z
     else:
         interface_a_start = z_lo
 
+    # Interface B: ends at upper metal surface bottom if provided
+    if upper_metal_surface_z is not None:
+        interface_b_end = upper_metal_surface_z
+    else:
+        interface_b_end = z_hi
+
+    # Compute midpoint of water region (between the two surfaces)
+    water_z_start = interface_a_start
+    water_z_end = interface_b_end
+    midpoint = (water_z_start + water_z_end) / 2.0
+
     return {
         'interface_a': (interface_a_start, interface_a_start + z_interface),
-        'interface_b': (z_hi - z_interface, z_hi),
+        'interface_b': (interface_b_end - z_interface, interface_b_end),
         'bulk': (midpoint - d_bulk, midpoint + d_bulk),
     }
 

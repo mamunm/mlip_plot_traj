@@ -473,3 +473,101 @@ def plot_hbond_regions_summary(
 
     plt.close()
     return output_file
+
+
+def plot_hbond_z_profile(
+    results: Dict[str, Any],
+    output_file: str = 'hbond_z_profile.png',
+    show_regions: bool = True,
+    show: bool = False,
+    verbose: bool = True,
+    logger: Optional[Any] = None
+) -> str:
+    """
+    Plot <nhbond> vs z-coordinate profile.
+
+    Shows how H-bonding varies continuously across the water layer.
+
+    Parameters
+    ----------
+    results : dict
+        Results from compute_hbond_analysis() containing 'z_profile'
+    output_file : str
+        Output filename
+    show_regions : bool
+        Whether to show region boundaries as vertical lines
+    show : bool
+        Whether to display plot interactively
+    verbose : bool
+        Print status messages
+    logger : optional
+        Logger instance
+
+    Returns
+    -------
+    output_file : str
+        Path to saved plot
+    """
+    z_profile = results.get('z_profile')
+    if z_profile is None:
+        if verbose:
+            _log(logger, 'warning', "No z-profile data available")
+        return output_file
+
+    z_centers = z_profile['z_centers']
+    nhbond_mean = z_profile['nhbond_mean']
+    nhbond_std = z_profile['nhbond_std']
+    n_samples = z_profile['n_samples']
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Plot mean with error band
+    valid_mask = n_samples > 0
+    ax.plot(z_centers[valid_mask], nhbond_mean[valid_mask],
+            color='#226556', linewidth=2, label=r'$\langle n_{hbond} \rangle$')
+    ax.fill_between(z_centers[valid_mask],
+                    nhbond_mean[valid_mask] - nhbond_std[valid_mask],
+                    nhbond_mean[valid_mask] + nhbond_std[valid_mask],
+                    color='#226556', alpha=0.3, label='± std')
+
+    # Add region boundaries if available
+    regions = results.get('regions')
+    if show_regions and regions is not None:
+        for region_name, (z_min, z_max) in regions.items():
+            color = REGION_COLORS.get(region_name, 'gray')
+            ax.axvline(z_min, color=color, linestyle='--', alpha=0.5, linewidth=1)
+            ax.axvline(z_max, color=color, linestyle='--', alpha=0.5, linewidth=1)
+            # Add shaded region
+            ax.axvspan(z_min, z_max, alpha=0.1, color=color)
+
+    # Mark metal surface if available
+    metal_surface_z = results.get('metal_surface_z')
+    if metal_surface_z is not None:
+        ax.axvline(metal_surface_z, color='brown', linestyle='-', linewidth=2,
+                   label=f'Metal surface ({metal_surface_z:.1f} A)')
+
+    ax.set_xlabel('z (Å)', fontsize=12, fontweight='bold')
+    ax.set_ylabel(r'$\langle n_{hbond} \rangle$', fontsize=12, fontweight='bold')
+    ax.set_title('Hydrogen Bond Profile vs Z-coordinate', fontsize=14, fontweight='bold')
+    ax.legend(loc='best')
+    ax.grid(True, alpha=0.3)
+
+    # Set reasonable y-limits
+    valid_means = nhbond_mean[valid_mask]
+    if len(valid_means) > 0:
+        y_min = max(0, valid_means.min() - 0.5)
+        y_max = valid_means.max() + 0.5
+        ax.set_ylim(y_min, y_max)
+
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+
+    if verbose:
+        _log(logger, 'success', f"Saved: {output_file}")
+
+    if show:
+        plt.show()
+
+    plt.close()
+    return output_file

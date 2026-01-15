@@ -321,9 +321,10 @@ def detect_hbonds_region_frame(
     Detect H-bonds with region attribution.
 
     Region Attribution Rule:
-    - An H-bond is counted in a region if BOTH the donor AND acceptor
-      oxygen are within that region's z-bounds.
-    - This measures H-bond density within each region for fair comparison.
+    - An H-bond is counted in a region if EITHER the donor OR acceptor
+      oxygen is within that region's z-bounds.
+    - Same H-bond can be counted in multiple regions if donor and acceptor
+      are in different regions.
 
     Parameters
     ----------
@@ -362,7 +363,7 @@ def detect_hbonds_region_frame(
         'global': (n_hbonds, n_water_total)
     }
 
-    # For each region, count H-bonds where BOTH donor and acceptor are in region
+    # For each region, count H-bonds where EITHER donor or acceptor is in region
     for region_name, (z_min, z_max) in regions.items():
         # Find waters in this region (based on O position)
         o_z = o_positions[:, 2]
@@ -374,7 +375,7 @@ def detect_hbonds_region_frame(
         o_idx_to_water_idx = {mol[0]: i for i, mol in enumerate(water_molecules)}
 
         if n_hbonds > 0:
-            # Count H-bonds where BOTH donor and acceptor are in region
+            # Count H-bonds where EITHER donor or acceptor is in region
             region_hbond_count = 0
             for d_idx, a_idx in zip(donor_indices, acceptor_indices):
                 d_water_idx = o_idx_to_water_idx.get(d_idx)
@@ -383,8 +384,8 @@ def detect_hbonds_region_frame(
                 if d_water_idx is not None and a_water_idx is not None:
                     donor_in_region = in_region_mask[d_water_idx]
                     acceptor_in_region = in_region_mask[a_water_idx]
-                    # Count if BOTH are in region (measures H-bond density within region)
-                    if donor_in_region and acceptor_in_region:
+                    # Count if EITHER is in region
+                    if donor_in_region or acceptor_in_region:
                         region_hbond_count += 1
 
             results[region_name] = (region_hbond_count, int(n_water_in_region))

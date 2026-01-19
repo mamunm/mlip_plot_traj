@@ -260,4 +260,168 @@ RegionMSDResult compute_msd_regions_from_positions(
     bool unwrap_z
 );
 
+// ============================================================================
+// Water Molecule Identification
+// ============================================================================
+
+/**
+ * Structure representing a single water molecule with geometric properties.
+ */
+struct WaterMolecule {
+    int O_index;                        // Index of oxygen atom
+    int H1_index;                       // Index of first hydrogen atom
+    int H2_index;                       // Index of second hydrogen atom
+    std::array<double, 3> O_position;   // Position of oxygen [x, y, z]
+    std::array<double, 3> H1_position;  // Position of first hydrogen
+    std::array<double, 3> H2_position;  // Position of second hydrogen
+    double OH1_distance;                // O-H1 bond distance (Angstroms)
+    double OH2_distance;                // O-H2 bond distance (Angstroms)
+    double H1H2_distance;               // H1-H2 distance (Angstroms)
+    double H1OH2_angle;                 // H1-O-H2 bond angle (degrees)
+};
+
+/**
+ * Result structure for water molecule identification.
+ */
+struct WaterIdentificationResult {
+    std::vector<std::array<int, 3>> molecule_indices;  // [O, H1, H2] for each molecule
+    size_t n_molecules;                                 // Number of molecules found
+};
+
+/**
+ * Identify water molecules from atomic positions and element types.
+ *
+ * Uses greedy nearest-neighbor assignment: for each oxygen atom,
+ * finds the two closest hydrogen atoms within the cutoff distance.
+ * Supports periodic boundary conditions via minimum image convention.
+ *
+ * @param positions     Flat array of positions [x0, y0, z0, x1, y1, z1, ...]
+ * @param element_types Array of element type indices (0-indexed)
+ * @param n_atoms       Number of atoms
+ * @param o_type_idx    Type index for oxygen atoms
+ * @param h_type_idx    Type index for hydrogen atoms
+ * @param box_lengths   Box dimensions [Lx, Ly, Lz] for PBC (zero = no PBC)
+ * @param o_h_cutoff    O-H bond distance cutoff (default: 1.2 Angstroms)
+ * @return              WaterIdentificationResult with molecule indices
+ */
+WaterIdentificationResult identify_water_molecules(
+    const double* positions,
+    const int* element_types,
+    size_t n_atoms,
+    int o_type_idx,
+    int h_type_idx,
+    const std::array<double, 3>& box_lengths,
+    double o_h_cutoff = 1.2
+);
+
+/**
+ * Extract geometric properties for water molecules in a single frame.
+ *
+ * @param positions        Flat array of positions for this frame
+ * @param molecule_indices Vector of [O, H1, H2] index tuples
+ * @param n_molecules      Number of water molecules
+ * @param box_lengths      Box dimensions [Lx, Ly, Lz] for PBC (zero = no PBC)
+ * @return                 Vector of WaterMolecule with computed properties
+ */
+std::vector<WaterMolecule> extract_water_properties(
+    const double* positions,
+    const std::vector<std::array<int, 3>>& molecule_indices,
+    size_t n_molecules,
+    const std::array<double, 3>& box_lengths
+);
+
+/**
+ * Extract geometric properties for water molecules across multiple frames.
+ *
+ * Uses OpenMP parallelization when available.
+ *
+ * @param all_positions    Vector of position arrays (one per frame)
+ * @param molecule_indices Vector of [O, H1, H2] index tuples
+ * @param n_molecules      Number of water molecules
+ * @param n_frames         Number of frames
+ * @param box_lengths      Box dimensions [Lx, Ly, Lz] for PBC (zero = no PBC)
+ * @return                 Vector of vectors: [frame_idx][molecule_idx]
+ */
+std::vector<std::vector<WaterMolecule>> extract_water_properties_multiframe(
+    const std::vector<const double*>& all_positions,
+    const std::vector<std::array<int, 3>>& molecule_indices,
+    size_t n_molecules,
+    size_t n_frames,
+    const std::array<double, 3>& box_lengths
+);
+
+// ============================================================================
+// Hydrogen Bond Identification
+// ============================================================================
+
+/**
+ * Structure representing a single hydrogen bond.
+ *
+ * A hydrogen bond D-H...A consists of:
+ * - D (Donor): The oxygen atom covalently bonded to H
+ * - H: The hydrogen atom forming the bridge
+ * - A (Acceptor): The oxygen atom accepting the hydrogen bond
+ */
+struct HydrogenBond {
+    int donor_water_idx;                    // Index of donor water molecule
+    int acceptor_water_idx;                 // Index of acceptor water molecule
+    int donor_O_idx;                        // Atom index of donor oxygen
+    int acceptor_O_idx;                     // Atom index of acceptor oxygen
+    int H_idx;                              // Atom index of bridging hydrogen
+    std::array<double, 3> donor_position;   // Position of donor oxygen
+    std::array<double, 3> acceptor_position;// Position of acceptor oxygen
+    std::array<double, 3> H_position;       // Position of bridging hydrogen
+    double DA_distance;                     // Donor-Acceptor distance (Angstroms)
+    double HA_distance;                     // Hydrogen-Acceptor distance (Angstroms)
+    double DHA_angle;                       // D-H-A angle (degrees)
+};
+
+/**
+ * Identify hydrogen bonds in a single frame.
+ *
+ * Searches for H-bonds between water molecules using geometric criteria:
+ * - D-A distance < da_cutoff
+ * - D-H-A angle > angle_cutoff
+ *
+ * @param positions      Flat array of positions [x0, y0, z0, x1, y1, z1, ...]
+ * @param water_indices  Vector of [O, H1, H2] indices for each water molecule
+ * @param n_waters       Number of water molecules
+ * @param box_lengths    Box dimensions [Lx, Ly, Lz] for PBC
+ * @param da_cutoff      Donor-Acceptor distance cutoff (default: 3.5 Angstroms)
+ * @param angle_cutoff   Minimum D-H-A angle (default: 150 degrees)
+ * @return               Vector of identified hydrogen bonds
+ */
+std::vector<HydrogenBond> identify_hbonds_frame(
+    const double* positions,
+    const std::vector<std::array<int, 3>>& water_indices,
+    size_t n_waters,
+    const std::array<double, 3>& box_lengths,
+    double da_cutoff = 3.5,
+    double angle_cutoff = 150.0
+);
+
+/**
+ * Identify hydrogen bonds across multiple frames.
+ *
+ * Uses OpenMP parallelization when available.
+ *
+ * @param all_positions    Vector of position arrays (one per frame)
+ * @param water_indices    Vector of [O, H1, H2] indices for each water molecule
+ * @param n_waters         Number of water molecules
+ * @param n_frames         Number of frames
+ * @param all_box_lengths  Box dimensions per frame for PBC
+ * @param da_cutoff        Donor-Acceptor distance cutoff (default: 3.5 Angstroms)
+ * @param angle_cutoff     Minimum D-H-A angle (default: 150 degrees)
+ * @return                 Vector of vectors: [frame_idx][hbond_idx]
+ */
+std::vector<std::vector<HydrogenBond>> identify_hbonds_multiframe(
+    const std::vector<const double*>& all_positions,
+    const std::vector<std::array<int, 3>>& water_indices,
+    size_t n_waters,
+    size_t n_frames,
+    const std::vector<std::array<double, 3>>& all_box_lengths,
+    double da_cutoff = 3.5,
+    double angle_cutoff = 150.0
+);
+
 } // namespace mlip

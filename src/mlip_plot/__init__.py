@@ -6,6 +6,15 @@ __version__ = "0.1.0"
 
 from .io.lammps import read_lammpstrj
 
+# Utils
+from .utils import (
+    WaterMolecule,
+    identify_water_molecules,
+    extract_water_molecules,
+    HydrogenBond,
+    identify_hbonds,
+)
+
 # Analysis functions
 from .analysis import (
     # Density
@@ -45,6 +54,13 @@ from .analysis import (
 __all__ = [
     # IO
     "read_lammpstrj",
+    # Utils - Water
+    "WaterMolecule",
+    "identify_water_molecules",
+    "extract_water_molecules",
+    # Utils - H-bond
+    "HydrogenBond",
+    "identify_hbonds",
     # Density
     "calculate_density_profile",
     # RDF

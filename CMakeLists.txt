@@ -12,6 +12,8 @@ pybind11_add_module(_core MODULE
     src/cpp/src/density.cpp
     src/cpp/src/rdf.cpp
     src/cpp/src/diffusion.cpp
+    src/cpp/src/water.cpp
+    src/cpp/src/hbond.cpp
     src/cpp/bindings.cpp
 )
 

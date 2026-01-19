@@ -483,6 +483,304 @@ py::dict py_compute_msd(
     return output;
 }
 
+/**
+ * Python wrapper for water molecule identification.
+ *
+ * @param positions      numpy array of shape (N, 3) with atom positions
+ * @param element_types  numpy array of shape (N,) with element type indices (0-indexed)
+ * @param o_type_idx     type index for oxygen atoms
+ * @param h_type_idx     type index for hydrogen atoms
+ * @param box_lengths    tuple (Lx, Ly, Lz) for PBC (0 = no PBC for that dimension)
+ * @param o_h_cutoff     O-H bond distance cutoff in Angstroms
+ * @return               tuple of (molecule_indices, n_molecules)
+ */
+py::tuple py_identify_water_molecules(
+    py::array_t<double, py::array::c_style | py::array::forcecast> positions,
+    py::array_t<int, py::array::c_style | py::array::forcecast> element_types,
+    int o_type_idx,
+    int h_type_idx,
+    std::tuple<double, double, double> box_lengths,
+    double o_h_cutoff
+) {
+    auto pos_buf = positions.request();
+    auto type_buf = element_types.request();
+
+    if (pos_buf.ndim != 2 || pos_buf.shape[1] != 3) {
+        throw std::runtime_error("positions must have shape (N, 3)");
+    }
+    if (type_buf.ndim != 1) {
+        throw std::runtime_error("element_types must be 1D array");
+    }
+    if (pos_buf.shape[0] != type_buf.shape[0]) {
+        throw std::runtime_error("positions and element_types must have same length");
+    }
+
+    size_t n_atoms = pos_buf.shape[0];
+    const double* pos_ptr = static_cast<const double*>(pos_buf.ptr);
+    const int* type_ptr = static_cast<const int*>(type_buf.ptr);
+
+    std::array<double, 3> box = {
+        std::get<0>(box_lengths),
+        std::get<1>(box_lengths),
+        std::get<2>(box_lengths)
+    };
+
+    auto result = mlip::identify_water_molecules(
+        pos_ptr, type_ptr, n_atoms, o_type_idx, h_type_idx, box, o_h_cutoff
+    );
+
+    // Convert to numpy array of shape (n_molecules, 3)
+    py::array_t<int> indices({static_cast<py::ssize_t>(result.n_molecules), static_cast<py::ssize_t>(3)});
+    auto idx_buf = indices.mutable_unchecked<2>();
+
+    for (size_t i = 0; i < result.n_molecules; ++i) {
+        idx_buf(i, 0) = result.molecule_indices[i][0];
+        idx_buf(i, 1) = result.molecule_indices[i][1];
+        idx_buf(i, 2) = result.molecule_indices[i][2];
+    }
+
+    return py::make_tuple(indices, static_cast<int>(result.n_molecules));
+}
+
+/**
+ * Python wrapper for extracting water properties from multiple frames.
+ *
+ * @param positions_list   list of numpy arrays, each (N, 3)
+ * @param molecule_indices numpy array of shape (n_molecules, 3) with [O, H1, H2] indices
+ * @param box_lengths      tuple (Lx, Ly, Lz) for PBC (0 = no PBC for that dimension)
+ * @return                 dict of numpy arrays with water properties
+ */
+py::dict py_extract_water_properties(
+    py::list positions_list,
+    py::array_t<int, py::array::c_style | py::array::forcecast> molecule_indices,
+    std::tuple<double, double, double> box_lengths
+) {
+    size_t n_frames = positions_list.size();
+
+    auto idx_buf = molecule_indices.request();
+    if (idx_buf.ndim != 2 || idx_buf.shape[1] != 3) {
+        throw std::runtime_error("molecule_indices must have shape (n_molecules, 3)");
+    }
+
+    size_t n_molecules = idx_buf.shape[0];
+    const int* idx_ptr = static_cast<const int*>(idx_buf.ptr);
+
+    // Convert indices to C++ format
+    std::vector<std::array<int, 3>> mol_indices(n_molecules);
+    for (size_t i = 0; i < n_molecules; ++i) {
+        mol_indices[i] = {idx_ptr[i * 3], idx_ptr[i * 3 + 1], idx_ptr[i * 3 + 2]};
+    }
+
+    // Collect positions
+    std::vector<const double*> all_positions;
+    std::vector<py::array_t<double>> pos_arrays;  // Keep references
+
+    for (size_t f = 0; f < n_frames; ++f) {
+        auto pos_arr = positions_list[f].cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
+        pos_arrays.push_back(pos_arr);
+        all_positions.push_back(static_cast<const double*>(pos_arr.request().ptr));
+    }
+
+    std::array<double, 3> box = {
+        std::get<0>(box_lengths),
+        std::get<1>(box_lengths),
+        std::get<2>(box_lengths)
+    };
+
+    // Extract properties
+    auto all_molecules = mlip::extract_water_properties_multiframe(
+        all_positions, mol_indices, n_molecules, n_frames, box
+    );
+
+    // Convert to numpy arrays: shape (n_frames, n_molecules, ...)
+    py::array_t<double> O_positions({static_cast<py::ssize_t>(n_frames),
+                                      static_cast<py::ssize_t>(n_molecules),
+                                      static_cast<py::ssize_t>(3)});
+    py::array_t<double> H1_positions({static_cast<py::ssize_t>(n_frames),
+                                       static_cast<py::ssize_t>(n_molecules),
+                                       static_cast<py::ssize_t>(3)});
+    py::array_t<double> H2_positions({static_cast<py::ssize_t>(n_frames),
+                                       static_cast<py::ssize_t>(n_molecules),
+                                       static_cast<py::ssize_t>(3)});
+    py::array_t<double> OH1_distances({static_cast<py::ssize_t>(n_frames),
+                                        static_cast<py::ssize_t>(n_molecules)});
+    py::array_t<double> OH2_distances({static_cast<py::ssize_t>(n_frames),
+                                        static_cast<py::ssize_t>(n_molecules)});
+    py::array_t<double> H1H2_distances({static_cast<py::ssize_t>(n_frames),
+                                         static_cast<py::ssize_t>(n_molecules)});
+    py::array_t<double> H1OH2_angles({static_cast<py::ssize_t>(n_frames),
+                                       static_cast<py::ssize_t>(n_molecules)});
+
+    auto O_buf = O_positions.mutable_unchecked<3>();
+    auto H1_buf = H1_positions.mutable_unchecked<3>();
+    auto H2_buf = H2_positions.mutable_unchecked<3>();
+    auto OH1_buf = OH1_distances.mutable_unchecked<2>();
+    auto OH2_buf = OH2_distances.mutable_unchecked<2>();
+    auto H1H2_buf = H1H2_distances.mutable_unchecked<2>();
+    auto angle_buf = H1OH2_angles.mutable_unchecked<2>();
+
+    for (size_t f = 0; f < n_frames; ++f) {
+        for (size_t m = 0; m < n_molecules; ++m) {
+            const auto& mol = all_molecules[f][m];
+
+            for (int j = 0; j < 3; ++j) {
+                O_buf(f, m, j) = mol.O_position[j];
+                H1_buf(f, m, j) = mol.H1_position[j];
+                H2_buf(f, m, j) = mol.H2_position[j];
+            }
+
+            OH1_buf(f, m) = mol.OH1_distance;
+            OH2_buf(f, m) = mol.OH2_distance;
+            H1H2_buf(f, m) = mol.H1H2_distance;
+            angle_buf(f, m) = mol.H1OH2_angle;
+        }
+    }
+
+    py::dict result;
+    result["O_positions"] = O_positions;
+    result["H1_positions"] = H1_positions;
+    result["H2_positions"] = H2_positions;
+    result["OH1_distances"] = OH1_distances;
+    result["OH2_distances"] = OH2_distances;
+    result["H1H2_distances"] = H1H2_distances;
+    result["H1OH2_angles"] = H1OH2_angles;
+
+    return result;
+}
+
+/**
+ * Python wrapper for hydrogen bond identification across multiple frames.
+ *
+ * @param positions_list    list of numpy arrays, each (N, 3)
+ * @param water_indices     numpy array of shape (n_waters, 3) with [O, H1, H2] indices
+ * @param box_lengths_list  list of tuples (Lx, Ly, Lz) for each frame
+ * @param da_cutoff         Donor-Acceptor distance cutoff
+ * @param angle_cutoff      Minimum D-H-A angle
+ * @return                  list of dicts with H-bond properties per frame
+ */
+py::list py_identify_hbonds(
+    py::list positions_list,
+    py::array_t<int, py::array::c_style | py::array::forcecast> water_indices,
+    py::list box_lengths_list,
+    double da_cutoff,
+    double angle_cutoff
+) {
+    size_t n_frames = positions_list.size();
+
+    if (n_frames != box_lengths_list.size()) {
+        throw std::runtime_error("positions_list and box_lengths_list must have same length");
+    }
+
+    auto idx_buf = water_indices.request();
+    if (idx_buf.ndim != 2 || idx_buf.shape[1] != 3) {
+        throw std::runtime_error("water_indices must have shape (n_waters, 3)");
+    }
+
+    size_t n_waters = idx_buf.shape[0];
+    const int* idx_ptr = static_cast<const int*>(idx_buf.ptr);
+
+    // Convert water indices to C++ format
+    std::vector<std::array<int, 3>> water_idx_vec(n_waters);
+    for (size_t i = 0; i < n_waters; ++i) {
+        water_idx_vec[i] = {idx_ptr[i * 3], idx_ptr[i * 3 + 1], idx_ptr[i * 3 + 2]};
+    }
+
+    // Collect positions and box lengths
+    std::vector<const double*> all_positions;
+    std::vector<py::array_t<double>> pos_arrays;
+    std::vector<std::array<double, 3>> all_box_lengths;
+
+    for (size_t f = 0; f < n_frames; ++f) {
+        auto pos_arr = positions_list[f].cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
+        pos_arrays.push_back(pos_arr);
+        all_positions.push_back(static_cast<const double*>(pos_arr.request().ptr));
+
+        auto box_tuple = box_lengths_list[f].cast<std::tuple<double, double, double>>();
+        all_box_lengths.push_back({
+            std::get<0>(box_tuple),
+            std::get<1>(box_tuple),
+            std::get<2>(box_tuple)
+        });
+    }
+
+    // Identify H-bonds
+    auto all_hbonds = mlip::identify_hbonds_multiframe(
+        all_positions, water_idx_vec, n_waters, n_frames,
+        all_box_lengths, da_cutoff, angle_cutoff
+    );
+
+    // Convert to Python list of dicts
+    py::list result;
+
+    for (size_t f = 0; f < n_frames; ++f) {
+        const auto& frame_hbonds = all_hbonds[f];
+        size_t n_hbonds = frame_hbonds.size();
+
+        // Create arrays for this frame
+        py::array_t<int> donor_water_idx(n_hbonds);
+        py::array_t<int> acceptor_water_idx(n_hbonds);
+        py::array_t<int> donor_O_idx(n_hbonds);
+        py::array_t<int> acceptor_O_idx(n_hbonds);
+        py::array_t<int> H_idx(n_hbonds);
+        py::array_t<double> donor_positions({static_cast<py::ssize_t>(n_hbonds), static_cast<py::ssize_t>(3)});
+        py::array_t<double> acceptor_positions({static_cast<py::ssize_t>(n_hbonds), static_cast<py::ssize_t>(3)});
+        py::array_t<double> H_positions({static_cast<py::ssize_t>(n_hbonds), static_cast<py::ssize_t>(3)});
+        py::array_t<double> DA_distances(n_hbonds);
+        py::array_t<double> HA_distances(n_hbonds);
+        py::array_t<double> DHA_angles(n_hbonds);
+
+        auto donor_water_buf = donor_water_idx.mutable_unchecked<1>();
+        auto acceptor_water_buf = acceptor_water_idx.mutable_unchecked<1>();
+        auto donor_O_buf = donor_O_idx.mutable_unchecked<1>();
+        auto acceptor_O_buf = acceptor_O_idx.mutable_unchecked<1>();
+        auto H_buf = H_idx.mutable_unchecked<1>();
+        auto donor_pos_buf = donor_positions.mutable_unchecked<2>();
+        auto acceptor_pos_buf = acceptor_positions.mutable_unchecked<2>();
+        auto H_pos_buf = H_positions.mutable_unchecked<2>();
+        auto DA_buf = DA_distances.mutable_unchecked<1>();
+        auto HA_buf = HA_distances.mutable_unchecked<1>();
+        auto DHA_buf = DHA_angles.mutable_unchecked<1>();
+
+        for (size_t h = 0; h < n_hbonds; ++h) {
+            const auto& hb = frame_hbonds[h];
+
+            donor_water_buf(h) = hb.donor_water_idx;
+            acceptor_water_buf(h) = hb.acceptor_water_idx;
+            donor_O_buf(h) = hb.donor_O_idx;
+            acceptor_O_buf(h) = hb.acceptor_O_idx;
+            H_buf(h) = hb.H_idx;
+
+            for (int j = 0; j < 3; ++j) {
+                donor_pos_buf(h, j) = hb.donor_position[j];
+                acceptor_pos_buf(h, j) = hb.acceptor_position[j];
+                H_pos_buf(h, j) = hb.H_position[j];
+            }
+
+            DA_buf(h) = hb.DA_distance;
+            HA_buf(h) = hb.HA_distance;
+            DHA_buf(h) = hb.DHA_angle;
+        }
+
+        py::dict frame_result;
+        frame_result["n_hbonds"] = static_cast<int>(n_hbonds);
+        frame_result["donor_water_idx"] = donor_water_idx;
+        frame_result["acceptor_water_idx"] = acceptor_water_idx;
+        frame_result["donor_O_idx"] = donor_O_idx;
+        frame_result["acceptor_O_idx"] = acceptor_O_idx;
+        frame_result["H_idx"] = H_idx;
+        frame_result["donor_positions"] = donor_positions;
+        frame_result["acceptor_positions"] = acceptor_positions;
+        frame_result["H_positions"] = H_positions;
+        frame_result["DA_distances"] = DA_distances;
+        frame_result["HA_distances"] = HA_distances;
+        frame_result["DHA_angles"] = DHA_angles;
+
+        result.append(frame_result);
+    }
+
+    return result;
+}
+
 PYBIND11_MODULE(_core, m) {
     m.doc() = "MLIP trajectory analysis C++ core module";
 
@@ -694,6 +992,124 @@ PYBIND11_MODULE(_core, m) {
               - 'planar': MSD in x-y plane (ndarray)
               - 'perpendicular': MSD in z direction (ndarray)
               - 'total': Total 3D MSD (ndarray)
+          )doc"
+    );
+
+    // Water molecule identification functions
+    m.def("identify_water_molecules", &py_identify_water_molecules,
+          py::arg("positions"),
+          py::arg("element_types"),
+          py::arg("o_type_idx"),
+          py::arg("h_type_idx"),
+          py::arg("box_lengths"),
+          py::arg("o_h_cutoff") = 1.2,
+          R"doc(
+          Identify water molecules from positions and element types.
+
+          Uses greedy nearest-neighbor assignment: for each oxygen atom,
+          finds the two closest hydrogen atoms within the cutoff distance.
+          Supports periodic boundary conditions via minimum image convention.
+
+          Parameters
+          ----------
+          positions : ndarray, shape (N, 3)
+              Atom positions
+          element_types : ndarray, shape (N,), dtype=int
+              Element type indices (0-indexed)
+          o_type_idx : int
+              Type index for oxygen atoms
+          h_type_idx : int
+              Type index for hydrogen atoms
+          box_lengths : tuple
+              Box dimensions (Lx, Ly, Lz) for PBC. Use 0 to disable PBC for a dimension.
+          o_h_cutoff : float, optional
+              O-H bond distance cutoff in Angstroms (default: 1.2)
+
+          Returns
+          -------
+          tuple
+              (molecule_indices, n_molecules)
+              molecule_indices: ndarray of shape (n_molecules, 3) with [O, H1, H2] indices
+          )doc"
+    );
+
+    m.def("extract_water_properties", &py_extract_water_properties,
+          py::arg("positions_list"),
+          py::arg("molecule_indices"),
+          py::arg("box_lengths"),
+          R"doc(
+          Extract water molecule properties for multiple frames.
+
+          Computes positions, distances, and angles for each water molecule
+          in each frame. Uses OpenMP parallelization when available.
+          Supports periodic boundary conditions via minimum image convention.
+
+          Parameters
+          ----------
+          positions_list : list of ndarray
+              List of position arrays, each shape (N, 3)
+          molecule_indices : ndarray, shape (n_molecules, 3), dtype=int
+              Water molecule indices [O, H1, H2] from identify_water_molecules
+          box_lengths : tuple
+              Box dimensions (Lx, Ly, Lz) for PBC. Use 0 to disable PBC for a dimension.
+
+          Returns
+          -------
+          dict
+              Dictionary with keys:
+              - 'O_positions': shape (n_frames, n_molecules, 3)
+              - 'H1_positions': shape (n_frames, n_molecules, 3)
+              - 'H2_positions': shape (n_frames, n_molecules, 3)
+              - 'OH1_distances': shape (n_frames, n_molecules)
+              - 'OH2_distances': shape (n_frames, n_molecules)
+              - 'H1H2_distances': shape (n_frames, n_molecules)
+              - 'H1OH2_angles': shape (n_frames, n_molecules) in degrees
+          )doc"
+    );
+
+    // Hydrogen bond identification functions
+    m.def("identify_hbonds", &py_identify_hbonds,
+          py::arg("positions_list"),
+          py::arg("water_indices"),
+          py::arg("box_lengths_list"),
+          py::arg("da_cutoff") = 3.5,
+          py::arg("angle_cutoff") = 150.0,
+          R"doc(
+          Identify hydrogen bonds between water molecules across multiple frames.
+
+          Uses geometric criteria:
+          - Donor-Acceptor distance < da_cutoff
+          - D-H-A angle > angle_cutoff
+
+          Parameters
+          ----------
+          positions_list : list of ndarray
+              List of position arrays, each shape (N, 3)
+          water_indices : ndarray, shape (n_waters, 3), dtype=int
+              Water molecule indices [O, H1, H2] from identify_water_molecules
+          box_lengths_list : list of tuple
+              Box dimensions (Lx, Ly, Lz) for each frame (supports NPT)
+          da_cutoff : float, optional
+              Donor-Acceptor distance cutoff in Angstroms (default: 3.5)
+          angle_cutoff : float, optional
+              Minimum D-H-A angle in degrees (default: 150.0)
+
+          Returns
+          -------
+          list of dict
+              List of dictionaries (one per frame), each containing:
+              - 'n_hbonds': int, number of H-bonds in frame
+              - 'donor_water_idx': ndarray, donor water molecule indices
+              - 'acceptor_water_idx': ndarray, acceptor water molecule indices
+              - 'donor_O_idx': ndarray, donor oxygen atom indices
+              - 'acceptor_O_idx': ndarray, acceptor oxygen atom indices
+              - 'H_idx': ndarray, bridging hydrogen atom indices
+              - 'donor_positions': ndarray (n_hbonds, 3), donor oxygen positions
+              - 'acceptor_positions': ndarray (n_hbonds, 3), acceptor oxygen positions
+              - 'H_positions': ndarray (n_hbonds, 3), hydrogen positions
+              - 'DA_distances': ndarray, donor-acceptor distances
+              - 'HA_distances': ndarray, hydrogen-acceptor distances
+              - 'DHA_angles': ndarray, D-H-A angles in degrees
           )doc"
     );
 }

@@ -15,80 +15,89 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeEl
 
 @click.command()
 @click.argument('trajectory', type=click.Path(exists=True))
-@click.option('--skip-frames', default='0.1', type=str, callback=parse_skip_frames,
+@click.option('--skip-frames', default=None, type=str, callback=parse_skip_frames,
               help='Frames to skip: integer or fraction (e.g., 0.1 for 10%%). Default: 0.1')
-@click.option('--dt', default=1.0, type=float,
-              help='Time between frames in picoseconds (default: 1.0)')
-@click.option('--d-a-cutoff', default=3.5, type=float,
+@click.option('--da-cutoff', default=3.5, type=float,
               help='Donor-Acceptor distance cutoff in Angstroms (default: 3.5)')
-@click.option('--angle-cutoff', default=120.0, type=float,
-              help='D-H-A angle cutoff in degrees (default: 120)')
+@click.option('--angle-cutoff', default=150.0, type=float,
+              help='D-H-A angle cutoff in degrees (default: 150)')
+@click.option('--o-h-cutoff', default=1.2, type=float,
+              help='O-H bond cutoff for water identification (default: 1.2)')
+@click.option('--n-blocks', default=5, type=int,
+              help='Number of blocks for error estimation (default: 5)')
+# Region options (metal-water interface)
 @click.option('--z-interface', default=None, type=float,
               help='Interface thickness from each surface (Angstroms). Requires --d-bulk.')
 @click.option('--d-bulk', default=None, type=float,
               help='Half-width of bulk region around midpoint (Angstroms). Requires --z-interface.')
-@click.option('--n-blocks', default=5, type=int,
-              help='Number of blocks for error estimation (default: 5)')
+@click.option('--allow-fraction', is_flag=True,
+              help='Allow waters with ANY atom in region (default: require ALL atoms in region)')
+@click.option('--da-inside', is_flag=True,
+              help='Require BOTH donor AND acceptor in region (default: EITHER in region)')
+@click.option('--n-bins', default=50, type=int,
+              help='Number of bins for z profile (default: 50)')
+@click.option('--dt', default=1.0, type=float,
+              help='Time between frames in ps (default: 1.0)')
+# Output options
+@click.option('--save-hbonds', is_flag=True,
+              help='Save H-bonds and waters as numpy arrays')
 @click.option('--output', '-o', default=None, type=str,
               help='Output prefix (default: trajectory filename)')
-@click.option('--xlim', nargs=2, type=float, default=None,
-              help='X-axis limits for time series plots (min max)')
-@click.option('--ylim', nargs=2, type=float, default=None,
-              help='Y-axis limits (min max)')
 @click.option('--show', is_flag=True,
               help='Show plots interactively')
 @click.option('--verbose', '-v', is_flag=True,
-              help='Print detailed progress information')
+              help='Print detailed progress')
 def hbond(
     trajectory: str,
     skip_frames: Optional[Union[int, float]],
-    dt: float,
-    d_a_cutoff: float,
+    da_cutoff: float,
     angle_cutoff: float,
+    o_h_cutoff: float,
+    n_blocks: int,
     z_interface: Optional[float],
     d_bulk: Optional[float],
-    n_blocks: int,
+    allow_fraction: bool,
+    da_inside: bool,
+    n_bins: int,
+    dt: float,
+    save_hbonds: bool,
     output: Optional[str],
-    xlim: Optional[Tuple[float, float]],
-    ylim: Optional[Tuple[float, float]],
     show: bool,
     verbose: bool
 ):
     """
-    Analyze hydrogen bonds in water from trajectory.
+    Analyze hydrogen bonds in MD trajectories.
 
-    Detects water-water H-bonds (O-H...O) using geometric criteria:
-    - Donor-Acceptor distance < d_a_cutoff (default: 3.5 A)
-    - D-H-A angle > angle_cutoff (default: 120 degrees)
+    Computes H-bond statistics using geometric criteria:
+    - Donor-Acceptor distance < da_cutoff (default: 3.5 A)
+    - D-H-A angle > angle_cutoff (default: 150 deg)
 
     \b
-    Key metric: <nhbond> = (N_hbonds * 2) / N_oxygen
-    This gives the average number of H-bonds per water molecule.
-    Typical value for bulk water: ~3.5
+    Reports H-bonds per water molecule (2 * n_hbonds / n_waters)
+    with block averaging for error estimation.
 
     \b
     Region analysis (--z-interface and --d-bulk):
     Computes separate statistics for three regions:
-    - Interface A: from metal surface to z_interface
-    - Interface B: z_length - z_interface to z_length
+    - Interface A: From lower metal surface to z_interface
+    - Interface B: From upper boundary - z_interface to upper boundary
     - Bulk: midpoint +/- d_bulk
-
-    H-bonds are attributed to a region if EITHER donor OR acceptor is in that region.
 
     \b
     Examples:
-      mlip-plot hbond trajectory.lammpstrj --dt 2.0
-      mlip-plot hbond trajectory.lammpstrj --d-a-cutoff 3.2 --angle-cutoff 140
-      mlip-plot hbond trajectory.lammpstrj --z-interface 20 --d-bulk 10
+      mlip-plot hbond trajectory.lammpstrj
+      mlip-plot hbond trajectory.lammpstrj --n-blocks 10 -v
+      mlip-plot hbond trajectory.lammpstrj --z-interface 5.0 --d-bulk 10.0
+      mlip-plot hbond trajectory.lammpstrj --save-hbonds -o output
     """
     from ..io.lammps import read_lammpstrj
-    from ..analysis.hbond import compute_hbond_analysis
-    from ..plotting.hbond import (
-        plot_hbond_time_series,
-        plot_nhbond_distribution,
-        plot_hbond_geometry,
-        plot_hbond_regions_summary,
-        plot_hbond_z_profile
+    from ..utils.water import extract_water_molecules
+    from ..utils.hbond import identify_hbonds
+    from ..analysis.hbond import (
+        analyze_hbonds,
+        compute_hbond_z_profile,
+        compute_hbond_time_profile,
+        save_hbonds_numpy,
     )
 
     # Fixed save folder for hbond analysis
@@ -122,15 +131,21 @@ def hbond(
         "Trajectory": str(trajectory),
         "Output folder": f"[cyan]{save_folder}/[/cyan]",
         "Skip frames": format_skip_frames_config(skip_frames),
-        "Time step": f"{dt} ps",
-        "D-A cutoff": f"{d_a_cutoff} A",
-        "D-H-A angle cutoff": f"{angle_cutoff} deg",
+        "D-A cutoff": f"{da_cutoff} A",
+        "Angle cutoff": f"{angle_cutoff} deg",
+        "O-H cutoff": f"{o_h_cutoff} A",
+        "Block averaging": f"{n_blocks} blocks",
     }
     if use_region_analysis:
         config["Region analysis"] = "[bold green]Enabled[/bold green]"
         config["Interface thickness"] = f"{z_interface} A"
         config["Bulk half-width"] = f"{d_bulk} A"
-    config["Block averaging"] = f"{n_blocks} blocks" if n_blocks > 1 else "Disabled"
+        config["Allow fraction"] = "[green]Yes[/green]" if allow_fraction else "[dim]No[/dim]"
+        config["D-A inside"] = "[green]Yes[/green]" if da_inside else "[dim]No[/dim]"
+    config["Z profile bins"] = f"{n_bins}"
+    config["Time step"] = f"{dt} ps"
+    if save_hbonds:
+        config["Save numpy"] = "[green]Yes[/green]"
 
     logger.print_table(logger.config_table(config))
 
@@ -175,12 +190,11 @@ def hbond(
     available_elements = sorted(set(frames[0]['elements']))
     logger.detail(f"Elements found: {', '.join(available_elements)}")
 
-    # Check for water (O and H atoms)
     if 'O' not in available_elements or 'H' not in available_elements:
         logger.error("H-bond analysis requires O and H atoms in trajectory")
         raise SystemExit(1)
 
-    # Compute H-bond analysis
+    # Extract water molecules
     with Progress(
         SpinnerColumn("dots"),
         TextColumn("[bold blue]{task.description}"),
@@ -189,251 +203,269 @@ def hbond(
         console=console,
         transient=True
     ) as progress:
-        task = progress.add_task("Computing hydrogen bonds...", total=None)
+        task = progress.add_task("Extracting water molecules...", total=None)
+        waters = extract_water_molecules(frames, o_h_cutoff=o_h_cutoff)
+        progress.remove_task(task)
 
-        results = compute_hbond_analysis(
-            frames, dt,
-            d_a_cutoff=d_a_cutoff,
-            d_h_a_angle_cutoff=angle_cutoff,
-            z_interface=z_interface, d_bulk=d_bulk,
-            n_blocks=n_blocks, verbose=verbose
+    n_waters = len(waters[0]) if waters else 0
+    logger.success(f"Found {n_waters} water molecules")
+
+    # Get box lengths for PBC
+    box_lengths = [
+        (f['box']['xhi'] - f['box']['xlo'],
+         f['box']['yhi'] - f['box']['ylo'],
+         f['box']['zhi'] - f['box']['zlo'])
+        for f in frames
+    ]
+
+    # Identify hydrogen bonds
+    with Progress(
+        SpinnerColumn("dots"),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(bar_width=30, style="dim", complete_style="cyan", finished_style="green"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True
+    ) as progress:
+        task = progress.add_task("Identifying hydrogen bonds...", total=None)
+        hbonds = identify_hbonds(
+            waters, box_lengths,
+            da_cutoff=da_cutoff, angle_cutoff=angle_cutoff
+        )
+        progress.remove_task(task)
+
+    total_hbonds = sum(len(frame_hbonds) for frame_hbonds in hbonds)
+    logger.success(f"Identified {total_hbonds} H-bonds across {len(frames)} frames")
+
+    # Analyze hydrogen bonds
+    with Progress(
+        SpinnerColumn("dots"),
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(bar_width=30, style="dim", complete_style="cyan", finished_style="green"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True
+    ) as progress:
+        task = progress.add_task("Analyzing H-bond statistics...", total=None)
+
+        results = analyze_hbonds(
+            frames, hbonds, waters,
+            n_blocks=n_blocks,
+            z_interface=z_interface,
+            d_bulk=d_bulk,
+            allow_fraction=allow_fraction,
+            da_inside=da_inside,
+            verbose=verbose
         )
 
         progress.remove_task(task)
 
-    logger.success(f"H-bond analysis complete for {results['n_water']} water molecules")
-
-    # Results tables
-    region_labels = {
-        'interface_a': 'Interface A',
-        'interface_b': 'Interface B',
-        'bulk': 'Bulk',
-        'global': 'Global'
-    }
-
-    summary = results['summary']
-    regions = results['regions']
+    # Display results
+    bulk_stats = results['bulk']
 
     if use_region_analysis:
         # Region-based results
-        for region_name in ['interface_a', 'bulk', 'interface_b', 'global']:
-            if region_name in summary:
-                s = summary[region_name]
+        region_stats = results['regions']
+        region_defs = results['region_definitions']
 
-                if region_name == 'global':
-                    title = f"H-bonds: {region_labels[region_name]}"
-                    z_range_str = "all"
-                else:
-                    z_range = regions[region_name]
-                    title = f"H-bonds: {region_labels[region_name]}"
-                    z_range_str = f"{z_range[0]:.1f}-{z_range[1]:.1f} A"
+        region_labels = {
+            'interface_a': 'Interface A (Lower)',
+            'interface_b': 'Interface B (Upper)',
+            'bulk': 'Bulk (Central)',
+        }
 
+        for region_name in ['interface_a', 'bulk', 'interface_b']:
+            if region_name in region_stats:
+                stats = region_stats[region_name]
+                z_range = region_defs[region_name]
+
+                title = f"H-bonds: {region_labels[region_name]} ({z_range[0]:.1f}-{z_range[1]:.1f} A)"
                 results_tbl = logger.results_table(title)
                 results_tbl.add_column("Metric", style="cyan")
                 results_tbl.add_column("Value", justify="right")
 
-                results_tbl.add_row("Z range", z_range_str)
-                results_tbl.add_row("Avg water molecules", f"{s['n_water']}")
-                results_tbl.add_row("Mean N_hbonds", f"{s['mean_n_hbonds']:.1f} +/- {s['std_n_hbonds']:.1f}")
-                results_tbl.add_row("<nhbond>", f"{s['mean_nhbond']:.4f} +/- {s['std_nhbond']:.4f}")
+                results_tbl.add_row("H-bonds/water", f"{stats['mean']:.3f} +/- {stats['std']:.3f}")
+                results_tbl.add_row("Avg waters in region", f"{stats['avg_waters']:.1f}")
+                results_tbl.add_row("Total H-bonds", f"{stats['total_hbonds']}")
 
                 logger.print_table(results_tbl)
+
+        # Global (bulk) statistics
+        title = "H-bonds: Global (All Waters)"
+        results_tbl = logger.results_table(title)
+        results_tbl.add_column("Metric", style="cyan")
+        results_tbl.add_column("Value", justify="right")
+
+        results_tbl.add_row("H-bonds/water", f"{bulk_stats['mean']:.3f} +/- {bulk_stats['std']:.3f}")
+        results_tbl.add_row("Water molecules", f"{bulk_stats['n_waters']}")
+        results_tbl.add_row("Total H-bonds", f"{bulk_stats['total_hbonds']}")
+        results_tbl.add_row("Blocks", f"{bulk_stats['n_blocks']}")
+
+        logger.print_table(results_tbl)
+
     else:
-        # Global-only results
-        s = summary['global']
+        # Bulk-only results
         results_tbl = logger.results_table("Hydrogen Bond Statistics")
         results_tbl.add_column("Metric", style="cyan")
         results_tbl.add_column("Value", justify="right")
 
-        results_tbl.add_row("Water molecules", f"{s['n_water']}")
-        results_tbl.add_row("Mean N_hbonds", f"{s['mean_n_hbonds']:.1f} +/- {s['std_n_hbonds']:.1f}")
-        results_tbl.add_row("<nhbond>", f"{s['mean_nhbond']:.4f} +/- {s['std_nhbond']:.4f}")
+        results_tbl.add_row("H-bonds/water", f"{bulk_stats['mean']:.3f} +/- {bulk_stats['std']:.3f}")
+        results_tbl.add_row("Water molecules", f"{bulk_stats['n_waters']}")
+        results_tbl.add_row("Frames analyzed", f"{bulk_stats['n_frames']}")
+        results_tbl.add_row("Total H-bonds", f"{bulk_stats['total_hbonds']}")
+        results_tbl.add_row("Blocks", f"{bulk_stats['n_blocks']}")
 
         logger.print_table(results_tbl)
 
-    # Geometry statistics
-    geometry = results['geometry']
-    if len(geometry['distances']) > 0:
-        geo_tbl = logger.results_table("H-bond Geometry")
-        geo_tbl.add_column("Parameter", style="cyan")
-        geo_tbl.add_column("Mean", justify="right")
-        geo_tbl.add_column("Std", justify="right")
+    # Profiles (always generated)
+    logger.section("Computing profiles")
 
-        geo_tbl.add_row(
-            "D-A distance (A)",
-            f"{np.mean(geometry['distances']):.3f}",
-            f"{np.std(geometry['distances']):.3f}"
-        )
-        geo_tbl.add_row(
-            "D-H-A angle (deg)",
-            f"{np.mean(geometry['angles']):.1f}",
-            f"{np.std(geometry['angles']):.1f}"
-        )
-        logger.print_table(geo_tbl)
+    # Z profile
+    box = frames[0]['box']
+    z_min = box['zlo']
+    z_max = box['zhi']
 
-    # Create plots
-    logger.section("Creating plots")
-
-    # 1. Time series plot (nhbond)
-    output_file = f"{output_prefix}_nhbond_timeseries.png"
-    plot_hbond_time_series(
-        results, output_file=output_file,
-        metric='nhbond',
-        xlim=xlim, ylim=ylim,
-        show=show, verbose=False
+    bin_centers, hbonds_per_water_z, water_counts, hbond_counts = compute_hbond_z_profile(
+        hbonds, waters, z_min, z_max, n_bins
     )
-    logger.success(f"Saved: [bold]{output_file}[/bold]")
 
-    # 2. Time series plot (n_hbonds)
-    output_file = f"{output_prefix}_nhbonds_count_timeseries.png"
-    plot_hbond_time_series(
-        results, output_file=output_file,
-        metric='n_hbonds',
-        xlim=xlim, ylim=None,
-        show=show, verbose=False
-    )
-    logger.success(f"Saved: [bold]{output_file}[/bold]")
-
-    # 3. Distribution plot
-    output_file = f"{output_prefix}_distribution.png"
-    plot_nhbond_distribution(
-        results, output_file=output_file,
-        show=show, verbose=False
-    )
-    logger.success(f"Saved: [bold]{output_file}[/bold]")
-
-    # 4. Geometry plot
-    if len(geometry['distances']) > 0:
-        output_file = f"{output_prefix}_geometry.png"
-        plot_hbond_geometry(
-            results, output_file=output_file,
-            show=show, verbose=False
-        )
-        logger.success(f"Saved: [bold]{output_file}[/bold]")
-
-    # 5. Region summary (if region analysis)
-    if use_region_analysis:
-        output_file = f"{output_prefix}_regions_summary.png"
-        plot_hbond_regions_summary(
-            results, output_file=output_file,
-            show=show, verbose=False
-        )
-        logger.success(f"Saved: [bold]{output_file}[/bold]")
-
-    # 6. Z-profile plot
-    output_file = f"{output_prefix}_z_profile.png"
-    plot_hbond_z_profile(
-        results, output_file=output_file,
-        show_regions=use_region_analysis,
-        show=show, verbose=False
-    )
-    logger.success(f"Saved: [bold]{output_file}[/bold]")
-
-    # Export CSV
-    logger.section("Exporting CSV")
-
-    csv_file = f"{output_prefix}_timeseries.csv"
-    _export_timeseries_csv(results, csv_file, use_region_analysis)
+    # Save z profile data
+    csv_file = f"{output_prefix}_z_profile.csv"
+    with open(csv_file, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['z_A', 'hbonds_per_water', 'water_count', 'hbond_count'])
+        for i in range(len(bin_centers)):
+            writer.writerow([f'{bin_centers[i]:.4f}', f'{hbonds_per_water_z[i]:.6f}',
+                           f'{water_counts[i]:.0f}', f'{hbond_counts[i]:.0f}'])
     logger.success(f"Saved: [bold]{csv_file}[/bold]")
 
-    csv_file = f"{output_prefix}_summary.csv"
-    _export_summary_csv(results, csv_file, d_a_cutoff, angle_cutoff, n_blocks)
+    # Plot z profile
+    try:
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(bin_centers, hbonds_per_water_z, 'b-', linewidth=1.5)
+        ax.set_xlabel('z (A)')
+        ax.set_ylabel('H-bonds per water')
+        ax.set_title('H-bonds per Water along z')
+        ax.grid(True, alpha=0.3)
+
+        plot_file = f"{output_prefix}_z_profile.png"
+        fig.tight_layout()
+        fig.savefig(plot_file, dpi=150)
+        if show:
+            plt.show()
+        plt.close(fig)
+        logger.success(f"Saved: [bold]{plot_file}[/bold]")
+    except ImportError:
+        logger.warning("matplotlib not available, skipping plot")
+
+    # Time profile
+    time_arr, hbonds_per_water = compute_hbond_time_profile(hbonds, n_waters, dt)
+
+    # Save time profile data
+    csv_file = f"{output_prefix}_time_profile.csv"
+    with open(csv_file, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['time_ps', 'hbonds_per_water'])
+        for i in range(len(time_arr)):
+            writer.writerow([f'{time_arr[i]:.4f}', f'{hbonds_per_water[i]:.6f}'])
+    logger.success(f"Saved: [bold]{csv_file}[/bold]")
+
+    # Plot time profile
+    try:
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(time_arr, hbonds_per_water, 'b-', linewidth=0.5, alpha=0.7)
+        ax.axhline(bulk_stats['mean'], color='r', linestyle='--', label=f"Mean: {bulk_stats['mean']:.2f}")
+        ax.set_xlabel('Time (ps)')
+        ax.set_ylabel('H-bonds per water')
+        ax.set_title('H-bonds per Water vs Time')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        plot_file = f"{output_prefix}_time_profile.png"
+        fig.tight_layout()
+        fig.savefig(plot_file, dpi=150)
+        if show:
+            plt.show()
+        plt.close(fig)
+        logger.success(f"Saved: [bold]{plot_file}[/bold]")
+    except ImportError:
+        logger.warning("matplotlib not available, skipping plot")
+
+    # Save numpy arrays
+    if save_hbonds:
+        logger.section("Saving numpy arrays")
+        save_hbonds_numpy(hbonds, waters, output_prefix)
+        logger.success(f"Saved: [bold]{output_prefix}_hbonds.npz[/bold]")
+        logger.success(f"Saved: [bold]{output_prefix}_waters.npz[/bold]")
+
+    # Export statistics CSV
+    logger.section("Exporting CSV")
+
+    csv_file = f"{output_prefix}_stats.csv"
+    _export_stats_csv(results, use_region_analysis, n_blocks, da_cutoff, angle_cutoff, csv_file)
     logger.success(f"Saved: [bold]{csv_file}[/bold]")
 
     logger.complete()
 
 
-# Need to import numpy for geometry stats
-import numpy as np
-
-
-def _export_timeseries_csv(results: dict, output_file: str, use_region_analysis: bool):
-    """Export time series data to CSV."""
-    ts = results['time_series']
-    time = ts['time']
-
+def _export_stats_csv(results: dict, use_region_analysis: bool, n_blocks: int,
+                      da_cutoff: float, angle_cutoff: float, output_file: str):
+    """Export H-bond statistics to CSV."""
     with open(output_file, 'w', newline='') as f:
         writer = csv.writer(f)
+
+        writer.writerow(['# Hydrogen Bond Analysis'])
+        writer.writerow([f'# D-A cutoff: {da_cutoff} A'])
+        writer.writerow([f'# Angle cutoff: {angle_cutoff} deg'])
+        writer.writerow([f'# Block averaging: {n_blocks} blocks'])
+        writer.writerow([])
 
         if use_region_analysis:
-            # Header with all region columns
-            header = ['time_ps']
-            for region in ['global', 'interface_a', 'bulk', 'interface_b']:
-                if region in ts:
-                    header.extend([
-                        f'{region}_n_hbonds',
-                        f'{region}_nhbond',
-                        f'{region}_n_water'
+            # Region-based format
+            writer.writerow(['region', 'z_min_A', 'z_max_A', 'hbonds_per_water_mean',
+                           'hbonds_per_water_std', 'avg_waters', 'total_hbonds'])
+
+            region_stats = results['regions']
+            region_defs = results['region_definitions']
+
+            for region_name in ['interface_a', 'bulk', 'interface_b']:
+                if region_name in region_stats:
+                    stats = region_stats[region_name]
+                    z_range = region_defs[region_name]
+                    writer.writerow([
+                        region_name,
+                        f'{z_range[0]:.4f}',
+                        f'{z_range[1]:.4f}',
+                        f'{stats["mean"]:.6f}',
+                        f'{stats["std"]:.6f}',
+                        f'{stats["avg_waters"]:.2f}',
+                        stats['total_hbonds']
                     ])
-            writer.writerow(header)
 
-            # Data rows
-            for i in range(len(time)):
-                row = [f'{time[i]:.4f}']
-                for region in ['global', 'interface_a', 'bulk', 'interface_b']:
-                    if region in ts:
-                        row.extend([
-                            f'{ts[region]["n_hbonds"][i]}',
-                            f'{ts[region]["nhbond"][i]:.6f}',
-                            f'{ts[region]["n_water"][i]}'
-                        ])
-                writer.writerow(row)
+            # Add global
+            bulk_stats = results['bulk']
+            box_zlo = results.get('z_lo', 0.0)
+            box_zhi = results.get('z_hi', 0.0)
+            writer.writerow([
+                'global',
+                f'{box_zlo:.4f}',
+                f'{box_zhi:.4f}',
+                f'{bulk_stats["mean"]:.6f}',
+                f'{bulk_stats["std"]:.6f}',
+                f'{bulk_stats["n_waters"]:.2f}',
+                bulk_stats['total_hbonds']
+            ])
         else:
-            # Global only
-            header = ['time_ps', 'n_hbonds', 'nhbond', 'n_water']
-            writer.writerow(header)
-
-            for i in range(len(time)):
-                row = [
-                    f'{time[i]:.4f}',
-                    f'{ts["global"]["n_hbonds"][i]}',
-                    f'{ts["global"]["nhbond"][i]:.6f}',
-                    f'{ts["global"]["n_water"][i]}'
-                ]
-                writer.writerow(row)
-
-
-def _export_summary_csv(results: dict, output_file: str,
-                        d_a_cutoff: float, angle_cutoff: float, n_blocks: int):
-    """Export summary statistics to CSV."""
-    summary = results['summary']
-    regions = results['regions']
-
-    with open(output_file, 'w', newline='') as f:
-        writer = csv.writer(f)
-
-        # Header comments
-        f.write(f'# Hydrogen Bond Analysis\n')
-        f.write(f'# D-A cutoff: {d_a_cutoff} A\n')
-        f.write(f'# D-H-A angle cutoff: {angle_cutoff} deg\n')
-        f.write(f'# Block averaging: {n_blocks} blocks\n')
-        f.write(f'# Total frames: {results["n_frames"]}\n')
-        f.write('#\n')
-
-        # Header row
-        header = ['region', 'z_min', 'z_max', 'n_water', 'mean_n_hbonds', 'std_n_hbonds', 'mean_nhbond', 'std_nhbond']
-        writer.writerow(header)
-
-        # Data rows
-        region_order = ['global', 'interface_a', 'bulk', 'interface_b']
-        for region_name in region_order:
-            if region_name in summary:
-                s = summary[region_name]
-
-                if region_name == 'global' or regions is None:
-                    z_min, z_max = 'N/A', 'N/A'
-                else:
-                    z_range = regions.get(region_name, (0, 0))
-                    z_min, z_max = f'{z_range[0]:.2f}', f'{z_range[1]:.2f}'
-
-                row = [
-                    region_name,
-                    z_min,
-                    z_max,
-                    s['n_water'],
-                    f'{s["mean_n_hbonds"]:.4f}',
-                    f'{s["std_n_hbonds"]:.4f}',
-                    f'{s["mean_nhbond"]:.6f}',
-                    f'{s["std_nhbond"]:.6f}'
-                ]
-                writer.writerow(row)
+            # Bulk-only format
+            writer.writerow(['metric', 'value'])
+            bulk_stats = results['bulk']
+            writer.writerow(['hbonds_per_water_mean', f'{bulk_stats["mean"]:.6f}'])
+            writer.writerow(['hbonds_per_water_std', f'{bulk_stats["std"]:.6f}'])
+            writer.writerow(['n_waters', bulk_stats['n_waters']])
+            writer.writerow(['n_frames', bulk_stats['n_frames']])
+            writer.writerow(['total_hbonds', bulk_stats['total_hbonds']])
+            writer.writerow(['n_blocks', bulk_stats['n_blocks']])

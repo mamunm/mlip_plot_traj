@@ -21,7 +21,7 @@ def main():
       density    Calculate and plot density profiles along an axis
       rdf        Calculate and plot radial distribution functions
       diffusion  Calculate diffusion coefficients from MSD
-      hbond      Analyze hydrogen bonds in water molecules
+      hbond      Analyze hydrogen bonds in trajectories
 
     \b
     Examples:
@@ -29,7 +29,7 @@ def main():
       mlip-plot density trajectory.lammpstrj
       mlip-plot rdf trajectory.lammpstrj -p O-O -p O-H
       mlip-plot diffusion trajectory.lammpstrj --dt 2.0
-      mlip-plot hbond trajectory.lammpstrj --d-a-cutoff 3.5
+      mlip-plot hbond trajectory.lammpstrj --n-blocks 5
 
     \b
     Use 'mlip-plot <command> --help' for more information on a command.

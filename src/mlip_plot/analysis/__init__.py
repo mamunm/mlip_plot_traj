@@ -10,8 +10,12 @@ from .diffusion import (
     compute_water_com_positions,
 )
 from .hbond import (
-    detect_hbonds_frame,
-    compute_hbond_analysis,
+    analyze_hbonds,
+    compute_hbond_statistics_bulk,
+    compute_hbond_statistics_regions,
+    compute_hbond_z_profile,
+    compute_hbond_time_profile,
+    save_hbonds_numpy,
 )
 from .statistics import (
     # Error estimation
@@ -50,8 +54,12 @@ __all__ = [
     "find_water_molecules",
     "compute_water_com_positions",
     # H-bond
-    "detect_hbonds_frame",
-    "compute_hbond_analysis",
+    "analyze_hbonds",
+    "compute_hbond_statistics_bulk",
+    "compute_hbond_statistics_regions",
+    "compute_hbond_z_profile",
+    "compute_hbond_time_profile",
+    "save_hbonds_numpy",
     # Statistics - Error estimation
     "ErrorEstimationResult",
     "compute_autocorrelation",

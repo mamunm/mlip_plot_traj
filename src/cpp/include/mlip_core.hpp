@@ -424,4 +424,65 @@ std::vector<std::vector<HydrogenBond>> identify_hbonds_multiframe(
     double angle_cutoff = 150.0
 );
 
+// ============================================================================
+// Water Molecule Orientation Analysis
+// ============================================================================
+
+/**
+ * Structure storing orientation data for a single water molecule.
+ *
+ * Contains cosine values of angles between molecular vectors and the
+ * surface normal, used for analyzing water orientation at interfaces.
+ */
+struct WaterOrientation {
+    int water_idx;           // Index of water molecule
+    double cos_theta_1;      // rOH1 · n (O→H1 dotted with surface normal)
+    double cos_theta_2;      // rOH2 · n (O→H2 dotted with surface normal)
+    double cos_phi;          // (H_mid → O) · n (dipole dotted with surface normal)
+    double O_z;              // Oxygen z-coordinate for region assignment
+};
+
+/**
+ * Compute orientation for all water molecules in a single frame.
+ *
+ * Calculates cos(theta) for O-H bonds and cos(phi) for dipole orientation
+ * relative to the surface normal vector.
+ *
+ * @param positions      Flat array of positions [x0, y0, z0, x1, y1, z1, ...]
+ * @param water_indices  Vector of [O, H1, H2] indices for each water molecule
+ * @param n_waters       Number of water molecules
+ * @param box_lengths    Box dimensions [Lx, Ly, Lz] for PBC
+ * @param surface_normal Surface normal vector (default: +z direction)
+ * @return               Vector of WaterOrientation for each molecule
+ */
+std::vector<WaterOrientation> compute_orientations_frame(
+    const double* positions,
+    const std::vector<std::array<int, 3>>& water_indices,
+    size_t n_waters,
+    const std::array<double, 3>& box_lengths,
+    const std::array<double, 3>& surface_normal = {0.0, 0.0, 1.0}
+);
+
+/**
+ * Compute orientations across multiple frames.
+ *
+ * Uses OpenMP parallelization when available.
+ *
+ * @param all_positions    Vector of position arrays (one per frame)
+ * @param water_indices    Vector of [O, H1, H2] indices for each water molecule
+ * @param n_waters         Number of water molecules
+ * @param n_frames         Number of frames
+ * @param all_box_lengths  Box dimensions per frame for PBC
+ * @param surface_normal   Surface normal vector (default: +z direction)
+ * @return                 Vector of vectors: [frame_idx][water_idx]
+ */
+std::vector<std::vector<WaterOrientation>> compute_orientations_multiframe(
+    const std::vector<const double*>& all_positions,
+    const std::vector<std::array<int, 3>>& water_indices,
+    size_t n_waters,
+    size_t n_frames,
+    const std::vector<std::array<double, 3>>& all_box_lengths,
+    const std::array<double, 3>& surface_normal = {0.0, 0.0, 1.0}
+);
+
 } // namespace mlip

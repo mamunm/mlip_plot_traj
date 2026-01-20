@@ -17,6 +17,14 @@ from .hbond import (
     compute_hbond_time_profile,
     save_hbonds_numpy,
 )
+from .reorientation import (
+    analyze_reorientation,
+    compute_orientation_distribution,
+    compute_orientation_statistics,
+    filter_orientations_by_region,
+    extract_cos_theta,
+    extract_cos_phi,
+)
 from .statistics import (
     # Error estimation
     ErrorEstimationResult,
@@ -60,6 +68,13 @@ __all__ = [
     "compute_hbond_z_profile",
     "compute_hbond_time_profile",
     "save_hbonds_numpy",
+    # Reorientation
+    "analyze_reorientation",
+    "compute_orientation_distribution",
+    "compute_orientation_statistics",
+    "filter_orientations_by_region",
+    "extract_cos_theta",
+    "extract_cos_phi",
     # Statistics - Error estimation
     "ErrorEstimationResult",
     "compute_autocorrelation",

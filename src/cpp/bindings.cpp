@@ -781,6 +781,115 @@ py::list py_identify_hbonds(
     return result;
 }
 
+/**
+ * Python wrapper for water molecule orientation computation across multiple frames.
+ *
+ * @param positions_list    list of numpy arrays, each (N, 3)
+ * @param water_indices     numpy array of shape (n_waters, 3) with [O, H1, H2] indices
+ * @param box_lengths_list  list of tuples (Lx, Ly, Lz) for each frame
+ * @param surface_normal    tuple (nx, ny, nz) for surface normal vector
+ * @return                  list of dicts with orientation properties per frame
+ */
+py::list py_compute_orientations(
+    py::list positions_list,
+    py::array_t<int, py::array::c_style | py::array::forcecast> water_indices,
+    py::list box_lengths_list,
+    std::tuple<double, double, double> surface_normal
+) {
+    size_t n_frames = positions_list.size();
+
+    if (n_frames != box_lengths_list.size()) {
+        throw std::runtime_error("positions_list and box_lengths_list must have same length");
+    }
+
+    auto idx_buf = water_indices.request();
+    if (idx_buf.ndim != 2 || idx_buf.shape[1] != 3) {
+        throw std::runtime_error("water_indices must have shape (n_waters, 3)");
+    }
+
+    size_t n_waters = idx_buf.shape[0];
+    const int* idx_ptr = static_cast<const int*>(idx_buf.ptr);
+
+    // Convert water indices to C++ format
+    std::vector<std::array<int, 3>> water_idx_vec(n_waters);
+    for (size_t i = 0; i < n_waters; ++i) {
+        water_idx_vec[i] = {idx_ptr[i * 3], idx_ptr[i * 3 + 1], idx_ptr[i * 3 + 2]};
+    }
+
+    // Collect positions and box lengths
+    std::vector<const double*> all_positions;
+    std::vector<py::array_t<double>> pos_arrays;
+    std::vector<std::array<double, 3>> all_box_lengths;
+
+    for (size_t f = 0; f < n_frames; ++f) {
+        auto pos_arr = positions_list[f].cast<py::array_t<double, py::array::c_style | py::array::forcecast>>();
+        pos_arrays.push_back(pos_arr);
+        all_positions.push_back(static_cast<const double*>(pos_arr.request().ptr));
+
+        auto box_tuple = box_lengths_list[f].cast<std::tuple<double, double, double>>();
+        all_box_lengths.push_back({
+            std::get<0>(box_tuple),
+            std::get<1>(box_tuple),
+            std::get<2>(box_tuple)
+        });
+    }
+
+    std::array<double, 3> surf_norm = {
+        std::get<0>(surface_normal),
+        std::get<1>(surface_normal),
+        std::get<2>(surface_normal)
+    };
+
+    // Compute orientations
+    auto all_orientations = mlip::compute_orientations_multiframe(
+        all_positions, water_idx_vec, n_waters, n_frames,
+        all_box_lengths, surf_norm
+    );
+
+    // Convert to Python list of dicts
+    py::list result;
+
+    for (size_t f = 0; f < n_frames; ++f) {
+        const auto& frame_orientations = all_orientations[f];
+        size_t n_orient = frame_orientations.size();
+
+        // Create arrays for this frame
+        py::array_t<int> water_idx_arr(n_orient);
+        py::array_t<double> cos_theta_1_arr(n_orient);
+        py::array_t<double> cos_theta_2_arr(n_orient);
+        py::array_t<double> cos_phi_arr(n_orient);
+        py::array_t<double> O_z_arr(n_orient);
+
+        auto water_idx_buf = water_idx_arr.mutable_unchecked<1>();
+        auto cos_theta_1_buf = cos_theta_1_arr.mutable_unchecked<1>();
+        auto cos_theta_2_buf = cos_theta_2_arr.mutable_unchecked<1>();
+        auto cos_phi_buf = cos_phi_arr.mutable_unchecked<1>();
+        auto O_z_buf = O_z_arr.mutable_unchecked<1>();
+
+        for (size_t w = 0; w < n_orient; ++w) {
+            const auto& orient = frame_orientations[w];
+
+            water_idx_buf(w) = orient.water_idx;
+            cos_theta_1_buf(w) = orient.cos_theta_1;
+            cos_theta_2_buf(w) = orient.cos_theta_2;
+            cos_phi_buf(w) = orient.cos_phi;
+            O_z_buf(w) = orient.O_z;
+        }
+
+        py::dict frame_result;
+        frame_result["n_waters"] = static_cast<int>(n_orient);
+        frame_result["water_idx"] = water_idx_arr;
+        frame_result["cos_theta_1"] = cos_theta_1_arr;
+        frame_result["cos_theta_2"] = cos_theta_2_arr;
+        frame_result["cos_phi"] = cos_phi_arr;
+        frame_result["O_z"] = O_z_arr;
+
+        result.append(frame_result);
+    }
+
+    return result;
+}
+
 PYBIND11_MODULE(_core, m) {
     m.doc() = "MLIP trajectory analysis C++ core module";
 
@@ -1110,6 +1219,42 @@ PYBIND11_MODULE(_core, m) {
               - 'DA_distances': ndarray, donor-acceptor distances
               - 'HA_distances': ndarray, hydrogen-acceptor distances
               - 'DHA_angles': ndarray, D-H-A angles in degrees
+          )doc"
+    );
+
+    // Water orientation analysis functions
+    m.def("compute_orientations", &py_compute_orientations,
+          py::arg("positions_list"),
+          py::arg("water_indices"),
+          py::arg("box_lengths_list"),
+          py::arg("surface_normal") = std::make_tuple(0.0, 0.0, 1.0),
+          R"doc(
+          Compute water molecule orientation angles relative to a surface normal.
+
+          Calculates cos(theta) for O-H bond orientations and cos(phi) for
+          dipole orientation across multiple frames.
+
+          Parameters
+          ----------
+          positions_list : list of ndarray
+              List of position arrays, each shape (N, 3)
+          water_indices : ndarray, shape (n_waters, 3), dtype=int
+              Water molecule indices [O, H1, H2] from identify_water_molecules
+          box_lengths_list : list of tuple
+              Box dimensions (Lx, Ly, Lz) for each frame (supports NPT)
+          surface_normal : tuple, optional
+              Surface normal vector (nx, ny, nz), default: (0, 0, 1) for +z
+
+          Returns
+          -------
+          list of dict
+              List of dictionaries (one per frame), each containing:
+              - 'n_waters': int, number of water molecules
+              - 'water_idx': ndarray, water molecule indices
+              - 'cos_theta_1': ndarray, rOH1 · n (O->H1 dot surface normal)
+              - 'cos_theta_2': ndarray, rOH2 · n (O->H2 dot surface normal)
+              - 'cos_phi': ndarray, dipole · n (H_mid->O dot surface normal)
+              - 'O_z': ndarray, oxygen z-coordinates for region assignment
           )doc"
     );
 }

@@ -14,6 +14,7 @@ pybind11_add_module(_core MODULE
     src/cpp/src/diffusion.cpp
     src/cpp/src/water.cpp
     src/cpp/src/hbond.cpp
+    src/cpp/src/reorientation.cpp
     src/cpp/bindings.cpp
 )
 

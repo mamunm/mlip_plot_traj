@@ -176,7 +176,6 @@ def compute_orientation_distribution(
     """
     bins = np.linspace(-1, 1, n_bins + 1)
     bin_centers = (bins[:-1] + bins[1:]) / 2
-    bin_width = bins[1] - bins[0]
 
     n_frames = len(cos_per_frame)
 
@@ -188,11 +187,7 @@ def compute_orientation_distribution(
         all_values = np.concatenate([f for f in cos_per_frame if len(f) > 0])
         if len(all_values) == 0:
             return bin_centers, np.zeros(n_bins), np.zeros(n_bins)
-        # Manual normalization following reference code
-        hist, _ = np.histogram(all_values, bins=bins, density=False)
-        normalization = np.sum(hist) * bin_width
-        if normalization > 0:
-            hist = hist / normalization
+        hist, _ = np.histogram(all_values, bins=bins, density=True)
         return bin_centers, hist, np.zeros(n_bins)
 
     frames_per_block = n_frames // n_blocks
@@ -206,11 +201,7 @@ def compute_orientation_distribution(
         block_values = np.concatenate([f for f in block_frames if len(f) > 0])
 
         if len(block_values) > 0:
-            # Manual normalization following reference code
-            hist, _ = np.histogram(block_values, bins=bins, density=False)
-            normalization = np.sum(hist) * bin_width
-            if normalization > 0:
-                hist = hist / normalization
+            hist, _ = np.histogram(block_values, bins=bins, density=True)
             block_histograms.append(hist)
 
     if len(block_histograms) == 0:

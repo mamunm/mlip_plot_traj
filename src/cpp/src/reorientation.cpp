@@ -26,10 +26,13 @@ namespace {
 
 /**
  * Apply minimum image convention for periodic boundary conditions.
+ *
+ * @param no_z_pbc If true, disable PBC in z direction (for slab geometries)
  */
 inline void apply_minimum_image(
     double& dx, double& dy, double& dz,
-    const std::array<double, 3>& box_lengths
+    const std::array<double, 3>& box_lengths,
+    bool no_z_pbc = false
 ) {
     if (box_lengths[0] > 0) {
         dx = dx - std::round(dx / box_lengths[0]) * box_lengths[0];
@@ -37,7 +40,7 @@ inline void apply_minimum_image(
     if (box_lengths[1] > 0) {
         dy = dy - std::round(dy / box_lengths[1]) * box_lengths[1];
     }
-    if (box_lengths[2] > 0) {
+    if (box_lengths[2] > 0 && !no_z_pbc) {
         dz = dz - std::round(dz / box_lengths[2]) * box_lengths[2];
     }
 }
@@ -45,18 +48,21 @@ inline void apply_minimum_image(
 /**
  * Calculate the displacement vector from pos1 to pos2 with PBC.
  * Result is stored in disp array: disp = pos2 - pos1 (with PBC correction).
+ *
+ * @param no_z_pbc If true, disable PBC in z direction (for slab geometries)
  */
 inline void displacement_pbc(
     const double* pos1,
     const double* pos2,
     const std::array<double, 3>& box_lengths,
-    double* disp
+    double* disp,
+    bool no_z_pbc = false
 ) {
     disp[0] = pos2[0] - pos1[0];
     disp[1] = pos2[1] - pos1[1];
     disp[2] = pos2[2] - pos1[2];
 
-    apply_minimum_image(disp[0], disp[1], disp[2], box_lengths);
+    apply_minimum_image(disp[0], disp[1], disp[2], box_lengths, no_z_pbc);
 }
 
 /**
@@ -103,7 +109,8 @@ std::vector<WaterOrientation> compute_orientations_frame(
     const std::vector<std::array<int, 3>>& water_indices,
     size_t n_waters,
     const std::array<double, 3>& box_lengths,
-    const std::array<double, 3>& surface_normal
+    const std::array<double, 3>& surface_normal,
+    bool no_z_pbc
 ) {
     std::vector<WaterOrientation> orientations;
     orientations.reserve(n_waters);
@@ -118,10 +125,10 @@ std::vector<WaterOrientation> compute_orientations_frame(
         const double* H1_pos = positions + H1_idx * 3;
         const double* H2_pos = positions + H2_idx * 3;
 
-        // Compute O→H1 and O→H2 vectors with PBC
+        // Compute O→H1 and O→H2 vectors with PBC (optionally disabled in z)
         double oh1[3], oh2[3];
-        displacement_pbc(O_pos, H1_pos, box_lengths, oh1);  // O → H1
-        displacement_pbc(O_pos, H2_pos, box_lengths, oh2);  // O → H2
+        displacement_pbc(O_pos, H1_pos, box_lengths, oh1, no_z_pbc);  // O → H1
+        displacement_pbc(O_pos, H2_pos, box_lengths, oh2, no_z_pbc);  // O → H2
 
         // H midpoint relative to O
         double h_mid[3] = {
@@ -153,7 +160,8 @@ std::vector<std::vector<WaterOrientation>> compute_orientations_multiframe(
     size_t n_waters,
     size_t n_frames,
     const std::vector<std::array<double, 3>>& all_box_lengths,
-    const std::array<double, 3>& surface_normal
+    const std::array<double, 3>& surface_normal,
+    bool no_z_pbc
 ) {
     std::vector<std::vector<WaterOrientation>> all_orientations(n_frames);
 
@@ -166,7 +174,8 @@ std::vector<std::vector<WaterOrientation>> compute_orientations_multiframe(
             water_indices,
             n_waters,
             all_box_lengths[f],
-            surface_normal
+            surface_normal,
+            no_z_pbc
         );
     }
 

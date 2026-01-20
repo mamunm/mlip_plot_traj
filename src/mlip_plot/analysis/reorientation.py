@@ -176,6 +176,7 @@ def compute_orientation_distribution(
     """
     bins = np.linspace(-1, 1, n_bins + 1)
     bin_centers = (bins[:-1] + bins[1:]) / 2
+    bin_width = bins[1] - bins[0]
 
     n_frames = len(cos_per_frame)
 
@@ -187,7 +188,11 @@ def compute_orientation_distribution(
         all_values = np.concatenate([f for f in cos_per_frame if len(f) > 0])
         if len(all_values) == 0:
             return bin_centers, np.zeros(n_bins), np.zeros(n_bins)
-        hist, _ = np.histogram(all_values, bins=bins, density=True)
+        # Manual normalization following reference code
+        hist, _ = np.histogram(all_values, bins=bins, density=False)
+        normalization = np.sum(hist) * bin_width
+        if normalization > 0:
+            hist = hist / normalization
         return bin_centers, hist, np.zeros(n_bins)
 
     frames_per_block = n_frames // n_blocks
@@ -201,7 +206,11 @@ def compute_orientation_distribution(
         block_values = np.concatenate([f for f in block_frames if len(f) > 0])
 
         if len(block_values) > 0:
-            hist, _ = np.histogram(block_values, bins=bins, density=True)
+            # Manual normalization following reference code
+            hist, _ = np.histogram(block_values, bins=bins, density=False)
+            normalization = np.sum(hist) * bin_width
+            if normalization > 0:
+                hist = hist / normalization
             block_histograms.append(hist)
 
     if len(block_histograms) == 0:
@@ -254,7 +263,7 @@ def compute_orientation_statistics(
         cos_values, n_bins, n_blocks
     )
 
-    # Compute statistics
+    # Compute cos statistics
     all_values = np.concatenate([f for f in cos_values if len(f) > 0])
     n_samples = len(all_values)
 
@@ -265,13 +274,25 @@ def compute_orientation_statistics(
         mean_cos = 0.0
         std_cos = 0.0
 
+    # Compute P(cos) statistics
+    if len(P_mean) > 0 and np.any(P_mean > 0):
+        mean_P = float(np.mean(P_mean))
+        std_P = float(np.std(P_mean))
+    else:
+        mean_P = 0.0
+        std_P = 0.0
+
     return {
         'bins': bin_centers,
         'P': P_mean,
         'err': P_std,
         'n_samples': n_samples,
+        # cos statistics
         'mean_cos': mean_cos,
         'std_cos': std_cos,
+        # P(cos) statistics
+        'mean_P': mean_P,
+        'std_P': std_P,
         'n_frames': len(orientations),
         'n_blocks': n_blocks,
     }

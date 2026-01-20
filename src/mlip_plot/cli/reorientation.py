@@ -20,6 +20,8 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeEl
               help='Frames to skip: integer or fraction (e.g., 0.1 for 10%%). Default: 0.1')
 @click.option('--o-h-cutoff', default=1.2, type=float,
               help='O-H bond cutoff for water identification (default: 1.2)')
+@click.option('--no-z-pbc', is_flag=True,
+              help='Disable periodic boundary conditions in z direction (for slab geometries)')
 @click.option('--n-bins', default=50, type=int,
               help='Number of bins for histogram (default: 50)')
 @click.option('--n-blocks', default=5, type=int,
@@ -41,12 +43,15 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeEl
               help='Y-axis limits for plots (e.g., --y-lim 0 1.5)')
 @click.option('--combined-plot', is_flag=True,
               help='Plot all regions on a single plot (one for theta, one for phi)')
+@click.option('--save-data', is_flag=True,
+              help='Save raw orientation data (cos_theta_1, cos_theta_2, cos_phi, O_z) per water per frame')
 @click.option('--verbose', '-v', is_flag=True,
               help='Print detailed progress')
 def reorientation(
     trajectory: str,
     skip_frames: Optional[Union[int, float]],
     o_h_cutoff: float,
+    no_z_pbc: bool,
     n_bins: int,
     n_blocks: int,
     z_interface: Optional[float],
@@ -56,6 +61,7 @@ def reorientation(
     x_lim: Optional[tuple],
     y_lim: Optional[tuple],
     combined_plot: bool,
+    save_data: bool,
     verbose: bool
 ):
     """
@@ -193,22 +199,9 @@ def reorientation(
     n_waters = len(waters[0]) if waters else 0
     logger.success(f"Found {n_waters} water molecules")
 
-    # Get water indices as numpy array
-    water_indices = np.array([
-        [w.O_index, w.H1_index, w.H2_index] for w in waters[0]
-    ], dtype=np.int32)
-
-    # Get box lengths and positions for each frame
-    box_lengths_list = [
-        (f['box']['xhi'] - f['box']['xlo'],
-         f['box']['yhi'] - f['box']['ylo'],
-         f['box']['zhi'] - f['box']['zlo'])
-        for f in frames
-    ]
-
-    positions_list = [f['positions'] for f in frames]
-
-    # Compute orientations using C++ core
+    # Compute orientations using C++ core (per-frame to handle different atom ordering)
+    # IMPORTANT: Atoms may be in different order in different frames of LAMMPS dump,
+    # so we must use per-frame water indices, not indices from frame 0.
     with Progress(
         SpinnerColumn("dots"),
         TextColumn("[bold blue]{task.description}"),
@@ -219,16 +212,42 @@ def reorientation(
     ) as progress:
         task = progress.add_task("Computing water orientations...", total=None)
 
-        orientations = compute_orientations(
-            positions_list,
-            water_indices,
-            box_lengths_list,
-            (0.0, 0.0, 1.0)  # Surface normal = +z
-        )
+        orientations = []
+        surface_normal = (0.0, 0.0, 1.0)
+
+        for frame_idx, frame in enumerate(frames):
+            # Get water indices for THIS frame
+            frame_waters = waters[frame_idx]
+            water_indices = np.array([
+                [w.O_index, w.H1_index, w.H2_index] for w in frame_waters
+            ], dtype=np.int32)
+
+            # Get box lengths and positions for this frame
+            box_lengths = (
+                frame['box']['xhi'] - frame['box']['xlo'],
+                frame['box']['yhi'] - frame['box']['ylo'],
+                frame['box']['zhi'] - frame['box']['zlo']
+            )
+
+            # Compute orientations for single frame
+            frame_orientations = compute_orientations(
+                [frame['positions']],
+                water_indices,
+                [box_lengths],
+                surface_normal,
+                no_z_pbc
+            )
+
+            # frame_orientations is a list with 1 element (single frame)
+            orientations.append(frame_orientations[0])
 
         progress.remove_task(task)
 
     logger.success(f"Computed orientations for {len(orientations)} frames")
+
+    # Save raw orientation data if requested
+    if save_data:
+        _export_raw_orientation_data(orientations, waters, output_prefix, logger)
 
     # Analyze orientations
     with Progress(
@@ -276,20 +295,26 @@ def reorientation(
                 title = f"Orientation: {region_labels[region_name]} ({z_range[0]:.1f}-{z_range[1]:.1f} Å)"
                 results_tbl = logger.results_table(title)
                 results_tbl.add_column("Angle", style="cyan")
-                results_tbl.add_column("Mean cos", justify="right")
-                results_tbl.add_column("Std cos", justify="right")
+                results_tbl.add_column("⟨cos⟩", justify="right")
+                results_tbl.add_column("σ(cos)", justify="right")
+                results_tbl.add_column("⟨P⟩", justify="right")
+                results_tbl.add_column("σ(P)", justify="right")
                 results_tbl.add_column("Samples", justify="right")
 
                 results_tbl.add_row(
                     "θ (O-H)",
                     f"{theta_stats['mean_cos']:.4f}",
                     f"{theta_stats['std_cos']:.4f}",
+                    f"{theta_stats['mean_P']:.4f}",
+                    f"{theta_stats['std_P']:.4f}",
                     f"{theta_stats['n_samples']}"
                 )
                 results_tbl.add_row(
                     "φ (dipole)",
                     f"{phi_stats['mean_cos']:.4f}",
                     f"{phi_stats['std_cos']:.4f}",
+                    f"{phi_stats['mean_P']:.4f}",
+                    f"{phi_stats['std_P']:.4f}",
                     f"{phi_stats['n_samples']}"
                 )
 
@@ -302,20 +327,26 @@ def reorientation(
     title = "Orientation: Global (All Waters)"
     results_tbl = logger.results_table(title)
     results_tbl.add_column("Angle", style="cyan")
-    results_tbl.add_column("Mean cos", justify="right")
-    results_tbl.add_column("Std cos", justify="right")
+    results_tbl.add_column("⟨cos⟩", justify="right")
+    results_tbl.add_column("σ(cos)", justify="right")
+    results_tbl.add_column("⟨P⟩", justify="right")
+    results_tbl.add_column("σ(P)", justify="right")
     results_tbl.add_column("Samples", justify="right")
 
     results_tbl.add_row(
         "θ (O-H)",
         f"{theta_global['mean_cos']:.4f}",
         f"{theta_global['std_cos']:.4f}",
+        f"{theta_global['mean_P']:.4f}",
+        f"{theta_global['std_P']:.4f}",
         f"{theta_global['n_samples']}"
     )
     results_tbl.add_row(
         "φ (dipole)",
         f"{phi_global['mean_cos']:.4f}",
         f"{phi_global['std_cos']:.4f}",
+        f"{phi_global['mean_P']:.4f}",
+        f"{phi_global['std_P']:.4f}",
         f"{phi_global['n_samples']}"
     )
 
@@ -425,7 +456,7 @@ def _export_stats_csv(results: dict, output_prefix: str, use_region_analysis: bo
         writer.writerow([f'# n_blocks: {results["n_blocks"]}'])
         writer.writerow([])
 
-        writer.writerow(['angle_type', 'region', 'z_min', 'z_max', 'mean_cos', 'std_cos', 'n_samples', 'avg_waters'])
+        writer.writerow(['angle_type', 'region', 'z_min', 'z_max', 'mean_cos', 'std_cos', 'mean_P', 'std_P', 'n_samples', 'avg_waters'])
 
         for angle_type in ['theta', 'phi']:
             data = results[angle_type]
@@ -440,8 +471,59 @@ def _export_stats_csv(results: dict, output_prefix: str, use_region_analysis: bo
                     f'{z_range[1]:.4f}' if z_range[1] != '' else '',
                     f'{stats["mean_cos"]:.6f}',
                     f'{stats["std_cos"]:.6f}',
+                    f'{stats["mean_P"]:.6f}',
+                    f'{stats["std_P"]:.6f}',
                     stats['n_samples'],
                     f'{avg_waters:.2f}'
                 ])
 
     logger.success(f"Saved: [bold]{csv_file}[/bold]")
+
+
+def _export_raw_orientation_data(orientations: list, waters: list, output_prefix: str, logger):
+    """Export raw orientation data (per water, per frame) as numpy arrays.
+
+    Saves:
+    - frame: frame index for each entry
+    - water_coords: oxygen coordinates (x, y, z) for each water
+    - cos_theta_1: O->H1 dot surface_normal
+    - cos_theta_2: O->H2 dot surface_normal
+    - cos_phi: dipole dot surface_normal
+
+    Note: Uses waters list (per-frame water identification) to get correct
+    oxygen coordinates since atoms may be in different order across frames.
+    """
+    npy_file = f"{output_prefix}_raw_data.npz"
+
+    # Collect all data into lists
+    all_frames = []
+    all_water_coords = []
+    all_cos_theta_1 = []
+    all_cos_theta_2 = []
+    all_cos_phi = []
+
+    for frame_idx, frame_data in enumerate(orientations):
+        n_waters = frame_data['n_waters']
+        frame_waters = waters[frame_idx]
+
+        for w in range(n_waters):
+            # Get oxygen coordinates from per-frame water identification
+            O_coords = frame_waters[w].O_position  # [x, y, z]
+
+            all_frames.append(frame_idx)
+            all_water_coords.append(O_coords)
+            all_cos_theta_1.append(frame_data['cos_theta_1'][w])
+            all_cos_theta_2.append(frame_data['cos_theta_2'][w])
+            all_cos_phi.append(frame_data['cos_phi'][w])
+
+    # Save as compressed numpy archive
+    np.savez(
+        npy_file,
+        frame=np.array(all_frames, dtype=np.int32),
+        water_coords=np.array(all_water_coords, dtype=np.float64),
+        cos_theta_1=np.array(all_cos_theta_1, dtype=np.float64),
+        cos_theta_2=np.array(all_cos_theta_2, dtype=np.float64),
+        cos_phi=np.array(all_cos_phi, dtype=np.float64)
+    )
+
+    logger.success(f"Saved: [bold]{npy_file}[/bold]")

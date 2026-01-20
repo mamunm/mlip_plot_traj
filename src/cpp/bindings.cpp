@@ -794,7 +794,8 @@ py::list py_compute_orientations(
     py::list positions_list,
     py::array_t<int, py::array::c_style | py::array::forcecast> water_indices,
     py::list box_lengths_list,
-    std::tuple<double, double, double> surface_normal
+    std::tuple<double, double, double> surface_normal,
+    bool no_z_pbc
 ) {
     size_t n_frames = positions_list.size();
 
@@ -843,7 +844,7 @@ py::list py_compute_orientations(
     // Compute orientations
     auto all_orientations = mlip::compute_orientations_multiframe(
         all_positions, water_idx_vec, n_waters, n_frames,
-        all_box_lengths, surf_norm
+        all_box_lengths, surf_norm, no_z_pbc
     );
 
     // Convert to Python list of dicts
@@ -1228,6 +1229,7 @@ PYBIND11_MODULE(_core, m) {
           py::arg("water_indices"),
           py::arg("box_lengths_list"),
           py::arg("surface_normal") = std::make_tuple(0.0, 0.0, 1.0),
+          py::arg("no_z_pbc") = false,
           R"doc(
           Compute water molecule orientation angles relative to a surface normal.
 
@@ -1244,6 +1246,8 @@ PYBIND11_MODULE(_core, m) {
               Box dimensions (Lx, Ly, Lz) for each frame (supports NPT)
           surface_normal : tuple, optional
               Surface normal vector (nx, ny, nz), default: (0, 0, 1) for +z
+          no_z_pbc : bool, optional
+              If True, disable PBC in z direction (for slab geometries), default: False
 
           Returns
           -------

@@ -453,6 +453,7 @@ struct WaterOrientation {
  * @param n_waters       Number of water molecules
  * @param box_lengths    Box dimensions [Lx, Ly, Lz] for PBC
  * @param surface_normal Surface normal vector (default: +z direction)
+ * @param no_z_pbc       If true, disable PBC in z direction (for slab geometries)
  * @return               Vector of WaterOrientation for each molecule
  */
 std::vector<WaterOrientation> compute_orientations_frame(
@@ -460,7 +461,8 @@ std::vector<WaterOrientation> compute_orientations_frame(
     const std::vector<std::array<int, 3>>& water_indices,
     size_t n_waters,
     const std::array<double, 3>& box_lengths,
-    const std::array<double, 3>& surface_normal = {0.0, 0.0, 1.0}
+    const std::array<double, 3>& surface_normal,
+    bool no_z_pbc = false
 );
 
 /**
@@ -474,6 +476,7 @@ std::vector<WaterOrientation> compute_orientations_frame(
  * @param n_frames         Number of frames
  * @param all_box_lengths  Box dimensions per frame for PBC
  * @param surface_normal   Surface normal vector (default: +z direction)
+ * @param no_z_pbc         If true, disable PBC in z direction (for slab geometries)
  * @return                 Vector of vectors: [frame_idx][water_idx]
  */
 std::vector<std::vector<WaterOrientation>> compute_orientations_multiframe(
@@ -482,7 +485,8 @@ std::vector<std::vector<WaterOrientation>> compute_orientations_multiframe(
     size_t n_waters,
     size_t n_frames,
     const std::vector<std::array<double, 3>>& all_box_lengths,
-    const std::array<double, 3>& surface_normal = {0.0, 0.0, 1.0}
+    const std::array<double, 3>& surface_normal,
+    bool no_z_pbc = false
 );
 
 } // namespace mlip

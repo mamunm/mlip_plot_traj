@@ -28,9 +28,11 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeEl
               help='Number of blocks for error estimation (default: 5)')
 # Region options (metal-water interface)
 @click.option('--z-interface', default=None, type=float,
-              help='Interface thickness from each surface (Angstroms). Requires --d-bulk.')
+              help='Interface thickness from each surface (Angstroms). Requires --d-bulk. For manual region mode.')
 @click.option('--d-bulk', default=None, type=float,
-              help='Half-width of bulk region around midpoint (Angstroms). Requires --z-interface.')
+              help='Half-width of bulk region around midpoint (Angstroms). Requires --z-interface. For manual region mode.')
+@click.option('--no-auto-layers', is_flag=True,
+              help='Disable automatic layer detection (compute global only when no region params given)')
 # Output options
 @click.option('--output', '-o', default=None, type=str,
               help='Output prefix (default: trajectory filename)')
@@ -56,6 +58,7 @@ def reorientation(
     n_blocks: int,
     z_interface: Optional[float],
     d_bulk: Optional[float],
+    no_auto_layers: bool,
     output: Optional[str],
     show: bool,
     x_lim: Optional[tuple],
@@ -78,8 +81,20 @@ def reorientation(
     - P = 0.5: isotropic (random) orientation
 
     \b
-    Region analysis (--z-interface and --d-bulk):
-    Computes separate distributions for three regions:
+    Region analysis modes:
+    1. Auto-detect (default): Automatically detects surface, subsurface, and
+       bulk layers from oxygen density profile when no region params given.
+    2. Manual (--z-interface and --d-bulk): User-specified regions.
+    3. Global only (--no-auto-layers): Only compute global distributions.
+
+    \b
+    Auto-detected regions (default):
+    - Surface: From metal surface to first O density minimum
+    - Subsurface: From first to second O density minimum
+    - Bulk: From second minimum to middle of box
+
+    \b
+    Manual regions (--z-interface and --d-bulk):
     - Interface A: From lower metal surface to z_interface
     - Interface B: From upper boundary - z_interface to upper boundary
     - Bulk: midpoint +/- d_bulk
@@ -89,6 +104,7 @@ def reorientation(
       mlip-plot reorientation trajectory.lammpstrj
       mlip-plot reorientation trajectory.lammpstrj --n-bins 100 -v
       mlip-plot reorientation trajectory.lammpstrj --z-interface 5.0 --d-bulk 10.0
+      mlip-plot reorientation trajectory.lammpstrj --no-auto-layers
     """
     from ..io.lammps import read_lammpstrj
     from ..utils.water import extract_water_molecules
@@ -117,7 +133,10 @@ def reorientation(
     if (z_interface is None) != (d_bulk is None):
         logger.error("--z-interface and --d-bulk must both be provided, or neither")
         raise SystemExit(1)
-    use_region_analysis = z_interface is not None
+
+    # Determine region analysis mode
+    manual_regions = z_interface is not None
+    auto_layers_enabled = not manual_regions and not no_auto_layers
 
     # Print header
     logger.header("MLIP Plot", "Water Reorientation Analysis")
@@ -131,10 +150,14 @@ def reorientation(
         "Histogram bins": f"{n_bins}",
         "Block averaging": f"{n_blocks} blocks",
     }
-    if use_region_analysis:
-        config["Region analysis"] = "[bold green]Enabled[/bold green]"
+    if manual_regions:
+        config["Region analysis"] = "[bold green]Manual[/bold green]"
         config["Interface thickness"] = f"{z_interface} Å"
         config["Bulk half-width"] = f"{d_bulk} Å"
+    elif auto_layers_enabled:
+        config["Region analysis"] = "[bold cyan]Auto-detect[/bold cyan]"
+    else:
+        config["Region analysis"] = "[dim]Disabled (global only)[/dim]"
 
     logger.print_table(logger.config_table(config))
 
@@ -266,7 +289,9 @@ def reorientation(
             n_blocks=n_blocks,
             z_interface=z_interface,
             d_bulk=d_bulk,
-            verbose=verbose
+            auto_layers=auto_layers_enabled,
+            verbose=verbose,
+            logger=logger
         )
 
         progress.remove_task(task)
@@ -274,51 +299,64 @@ def reorientation(
     # Display results
     theta_data = results['theta']
     phi_data = results['phi']
+    region_mode = results.get('region_mode', 'global')
 
-    if use_region_analysis:
-        # Region-based results
+    # Region labels for display
+    region_labels = {
+        # Manual regions
+        'interface_a': 'Interface A (Lower)',
+        'interface_b': 'Interface B (Upper)',
+        # Auto-detected regions
+        'surface': 'Surface',
+        'subsurface': 'Subsurface',
+        'bulk': 'Bulk',
+        'global': 'Global',
+    }
+
+    # Determine which regions to display based on mode
+    if region_mode == 'manual':
         regions_order = ['interface_a', 'bulk', 'interface_b']
+    elif region_mode == 'auto':
+        regions_order = ['surface', 'subsurface', 'bulk']
+    else:
+        regions_order = []
 
-        for region_name in regions_order:
-            if region_name in theta_data:
-                theta_stats = theta_data[region_name]
-                phi_stats = phi_data[region_name]
+    # Display region-based results
+    for region_name in regions_order:
+        if region_name in theta_data:
+            theta_stats = theta_data[region_name]
+            phi_stats = phi_data[region_name]
 
-                z_range = theta_stats.get('z_range', (0, 0))
+            z_range = theta_stats.get('z_range', (0, 0))
+            label = region_labels.get(region_name, region_name.title())
 
-                region_labels = {
-                    'interface_a': 'Interface A (Lower)',
-                    'interface_b': 'Interface B (Upper)',
-                    'bulk': 'Bulk (Central)',
-                }
+            title = f"Orientation: {label} ({z_range[0]:.1f}-{z_range[1]:.1f} Å)"
+            results_tbl = logger.results_table(title)
+            results_tbl.add_column("Angle", style="cyan")
+            results_tbl.add_column("⟨cos⟩", justify="right")
+            results_tbl.add_column("σ(cos)", justify="right")
+            results_tbl.add_column("⟨P⟩", justify="right")
+            results_tbl.add_column("σ(P)", justify="right")
+            results_tbl.add_column("Samples", justify="right")
 
-                title = f"Orientation: {region_labels[region_name]} ({z_range[0]:.1f}-{z_range[1]:.1f} Å)"
-                results_tbl = logger.results_table(title)
-                results_tbl.add_column("Angle", style="cyan")
-                results_tbl.add_column("⟨cos⟩", justify="right")
-                results_tbl.add_column("σ(cos)", justify="right")
-                results_tbl.add_column("⟨P⟩", justify="right")
-                results_tbl.add_column("σ(P)", justify="right")
-                results_tbl.add_column("Samples", justify="right")
+            results_tbl.add_row(
+                "θ (O-H)",
+                f"{theta_stats['mean_cos']:.4f}",
+                f"{theta_stats['std_cos']:.4f}",
+                f"{theta_stats['mean_P']:.4f}",
+                f"{theta_stats['std_P']:.4f}",
+                f"{theta_stats['n_samples']}"
+            )
+            results_tbl.add_row(
+                "φ (dipole)",
+                f"{phi_stats['mean_cos']:.4f}",
+                f"{phi_stats['std_cos']:.4f}",
+                f"{phi_stats['mean_P']:.4f}",
+                f"{phi_stats['std_P']:.4f}",
+                f"{phi_stats['n_samples']}"
+            )
 
-                results_tbl.add_row(
-                    "θ (O-H)",
-                    f"{theta_stats['mean_cos']:.4f}",
-                    f"{theta_stats['std_cos']:.4f}",
-                    f"{theta_stats['mean_P']:.4f}",
-                    f"{theta_stats['std_P']:.4f}",
-                    f"{theta_stats['n_samples']}"
-                )
-                results_tbl.add_row(
-                    "φ (dipole)",
-                    f"{phi_stats['mean_cos']:.4f}",
-                    f"{phi_stats['std_cos']:.4f}",
-                    f"{phi_stats['mean_P']:.4f}",
-                    f"{phi_stats['std_P']:.4f}",
-                    f"{phi_stats['n_samples']}"
-                )
-
-                logger.print_table(results_tbl)
+            logger.print_table(results_tbl)
 
     # Global statistics
     theta_global = theta_data['global']
@@ -356,10 +394,22 @@ def reorientation(
     logger.section("Generating plots")
 
     # Determine which regions to plot
-    if use_region_analysis:
+    if region_mode == 'manual':
         regions_to_plot = ['interface_a', 'bulk', 'interface_b']
+    elif region_mode == 'auto':
+        regions_to_plot = ['surface', 'subsurface', 'bulk']
     else:
         regions_to_plot = ['global']
+
+    # Plot layer detection if auto-layers was used
+    if region_mode == 'auto' and 'layer_diagnostics' in results:
+        from ..plotting.reorientation import plot_layer_detection
+        plot_layer_detection(
+            results['layer_diagnostics'],
+            output_prefix,
+            show=show,
+            logger=logger
+        )
 
     if combined_plot:
         # Plot all regions on single plots (one for theta, one for phi)
@@ -383,7 +433,7 @@ def reorientation(
 
     _export_distribution_csv(theta_data, output_prefix, 'theta', regions_to_plot, logger)
     _export_distribution_csv(phi_data, output_prefix, 'phi', regions_to_plot, logger)
-    _export_stats_csv(results, output_prefix, use_region_analysis, logger)
+    _export_stats_csv(results, output_prefix, region_mode, logger)
 
     logger.complete()
 
@@ -442,7 +492,7 @@ def _export_distribution_csv(
     logger.success(f"Saved: [bold]{csv_file}[/bold]")
 
 
-def _export_stats_csv(results: dict, output_prefix: str, use_region_analysis: bool, logger):
+def _export_stats_csv(results: dict, output_prefix: str, region_mode: str, logger):
     """Export orientation statistics to CSV."""
     csv_file = f"{output_prefix}_stats.csv"
 
@@ -450,6 +500,7 @@ def _export_stats_csv(results: dict, output_prefix: str, use_region_analysis: bo
         writer = csv.writer(f)
 
         writer.writerow(['# Water Orientation Statistics'])
+        writer.writerow([f'# region_mode: {region_mode}'])
         writer.writerow([f'# n_frames: {results["n_frames"]}'])
         writer.writerow([f'# n_waters: {results["n_waters"]}'])
         writer.writerow([f'# n_bins: {results["n_bins"]}'])

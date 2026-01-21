@@ -9,17 +9,25 @@ import numpy as np
 
 # Region colors
 REGION_COLORS = {
+    # Manual regions
     'interface_a': '#da4a64',  # Red
     'interface_b': '#6181ad',  # Blue
     'bulk': '#226556',         # Green
     'global': '#70608d',       # Purple
+    # Auto-detected regions
+    'surface': '#da4a64',      # Red (same as interface_a)
+    'subsurface': '#e88a6f',   # Orange
 }
 
 REGION_LABELS = {
+    # Manual regions
     'interface_a': 'Interface A (Lower)',
     'interface_b': 'Interface B (Upper)',
     'bulk': 'Bulk',
     'global': 'Global',
+    # Auto-detected regions
+    'surface': 'Surface',
+    'subsurface': 'Subsurface',
 }
 
 
@@ -375,3 +383,97 @@ def plot_combined_regions(
     output_files.append(output_file)
 
     return output_files
+
+
+def plot_layer_detection(
+    diagnostics: Dict,
+    output_prefix: str,
+    show: bool = False,
+    verbose: bool = True,
+    logger: Optional[Any] = None
+) -> str:
+    """
+    Plot oxygen density profile with detected layer boundaries.
+
+    Parameters
+    ----------
+    diagnostics : dict
+        Layer detection diagnostics from define_auto_regions(), containing:
+        - 'boundaries': dict with z_surface, z_surface_min, z_subsurface_min, etc.
+        - 'lower_surface_z': metal surface position
+        - 'z_mid': midpoint of analysis region
+    output_prefix : str
+        Output file prefix
+    show : bool
+        Show plot interactively
+    verbose : bool
+        Print progress
+    logger : optional
+        Logger instance
+
+    Returns
+    -------
+    output_file : str
+        Path to saved plot
+    """
+    import matplotlib.pyplot as plt
+
+    boundaries = diagnostics['boundaries']
+    z_surface = boundaries['z_surface']
+    bin_centers = boundaries['bin_centers']
+    density_smooth = boundaries['density_smooth']
+    density_raw = boundaries.get('density', density_smooth)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Plot density profiles relative to surface
+    z_rel = bin_centers - z_surface
+    ax.plot(z_rel, density_raw, 'k-', alpha=0.3, linewidth=1, label='Raw O density')
+    ax.plot(z_rel, density_smooth, 'b-', linewidth=2, label='Smoothed O density')
+
+    # Mark detected boundaries (relative to surface)
+    z_surface_min_rel = boundaries['z_surface_min'] - z_surface
+    z_subsurface_min_rel = boundaries['z_subsurface_min'] - z_surface
+
+    ax.axvline(z_surface_min_rel, color=REGION_COLORS['surface'], linestyle='--', linewidth=2,
+               label=f'Surface/Subsurface: {z_surface_min_rel:.2f} Å')
+    ax.axvline(z_subsurface_min_rel, color=REGION_COLORS['subsurface'], linestyle='--', linewidth=2,
+               label=f'Subsurface/Bulk: {z_subsurface_min_rel:.2f} Å')
+
+    # Mark surface peak
+    z_peak_rel = boundaries['z_surface_peak'] - z_surface
+    ax.axvline(z_peak_rel, color='green', linestyle=':', linewidth=1.5,
+               label=f'Surface peak: {z_peak_rel:.2f} Å')
+
+    # Shade regions
+    ax.axvspan(0, z_surface_min_rel, alpha=0.15, color=REGION_COLORS['surface'], label='Surface layer')
+    ax.axvspan(z_surface_min_rel, z_subsurface_min_rel, alpha=0.15, color=REGION_COLORS['subsurface'], label='Subsurface layer')
+
+    # Shade bulk region (up to end of data)
+    z_max_rel = bin_centers[-1] - z_surface
+    ax.axvspan(z_subsurface_min_rel, z_max_rel, alpha=0.15, color=REGION_COLORS['bulk'], label='Bulk region')
+
+    ax.set_xlabel('Distance from metal surface (Å)', fontsize=14)
+    ax.set_ylabel('O atom density (per frame per Å)', fontsize=14)
+    ax.set_title('Oxygen Density Profile with Auto-Detected Layers', fontsize=16)
+
+    # Set x-axis limits
+    ax.set_xlim(0, min(z_max_rel, 15))
+
+    ax.legend(fontsize=10, loc='upper right')
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+
+    output_file = f"{output_prefix}_layer_detection.png"
+    fig.savefig(output_file, dpi=150)
+
+    if show:
+        plt.show()
+
+    plt.close(fig)
+
+    if verbose:
+        _log(logger, 'success', f"Saved: [bold]{output_file}[/bold]")
+
+    return output_file

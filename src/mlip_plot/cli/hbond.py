@@ -26,10 +26,18 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeEl
 @click.option('--n-blocks', default=5, type=int,
               help='Number of blocks for error estimation (default: 5)')
 # Region options (metal-water interface)
+@click.option('--z-surface', default=None, type=float,
+              help='Surface-layer thickness from each metal surface (Angstroms). Requires --d-bulk. '
+                   'Manual mode. Pair with --z-subsurface for surface/subsurface/bulk split.')
+@click.option('--z-subsurface', default=None, type=float,
+              help='Subsurface-layer thickness (Angstroms). Optional. When provided, regions become '
+                   'surface / subsurface / bulk; when omitted, legacy interface_a / interface_b / bulk.')
 @click.option('--z-interface', default=None, type=float,
-              help='Interface thickness from each surface (Angstroms). Requires --d-bulk.')
+              help='[DEPRECATED] Alias for --z-surface.')
 @click.option('--d-bulk', default=None, type=float,
-              help='Half-width of bulk region around midpoint (Angstroms). Requires --z-interface.')
+              help='Half-width of bulk region around midpoint (Angstroms).')
+@click.option('--no-auto-layers', is_flag=True,
+              help='Disable automatic layer detection (only compute bulk when no manual region given).')
 @click.option('--allow-fraction', is_flag=True,
               help='Allow waters with ANY atom in region (default: require ALL atoms in region)')
 @click.option('--da-inside', is_flag=True,
@@ -54,8 +62,11 @@ def hbond(
     angle_cutoff: float,
     o_h_cutoff: float,
     n_blocks: int,
+    z_surface: Optional[float],
+    z_subsurface: Optional[float],
     z_interface: Optional[float],
     d_bulk: Optional[float],
+    no_auto_layers: bool,
     allow_fraction: bool,
     da_inside: bool,
     n_bins: int,
@@ -77,17 +88,20 @@ def hbond(
     with block averaging for error estimation.
 
     \b
-    Region analysis (--z-interface and --d-bulk):
-    Computes separate statistics for three regions:
-    - Interface A: From lower metal surface to z_interface
-    - Interface B: From upper boundary - z_interface to upper boundary
-    - Bulk: midpoint +/- d_bulk
+    Region analysis:
+    1. Auto-detect (default): surface / subsurface / bulk from the O density
+       profile (requires scipy). Disable with --no-auto-layers.
+    2. Manual --z-surface + --d-bulk (legacy naming):
+       interface_a / interface_b / bulk.
+    3. Manual --z-surface + --z-subsurface + --d-bulk:
+       surface / subsurface / bulk.
 
     \b
     Examples:
       mlip-plot hbond trajectory.lammpstrj
       mlip-plot hbond trajectory.lammpstrj --n-blocks 10 -v
-      mlip-plot hbond trajectory.lammpstrj --z-interface 5.0 --d-bulk 10.0
+      mlip-plot hbond trajectory.lammpstrj --z-surface 5 --d-bulk 10
+      mlip-plot hbond trajectory.lammpstrj --z-surface 3 --z-subsurface 3 --d-bulk 10
       mlip-plot hbond trajectory.lammpstrj --save-hbonds -o output
     """
     from ..io.lammps import read_lammpstrj
@@ -117,11 +131,26 @@ def hbond(
         output_prefix = save_path / output
     output_prefix = str(output_prefix)
 
-    # Validate region parameters
-    if (z_interface is None) != (d_bulk is None):
-        logger.error("--z-interface and --d-bulk must both be provided, or neither")
+    # Resolve deprecated alias
+    if z_interface is not None:
+        if z_surface is None:
+            z_surface = z_interface
+            logger.warning("[deprecated] --z-interface is an alias for --z-surface; please migrate.")
+        else:
+            logger.error("Specify either --z-surface or --z-interface, not both")
+            raise SystemExit(1)
+
+    # Validate manual-region coupling
+    if (z_surface is None) != (d_bulk is None):
+        logger.error("--z-surface (or --z-interface) and --d-bulk must both be provided, or neither")
         raise SystemExit(1)
-    use_region_analysis = z_interface is not None
+    if z_subsurface is not None and z_surface is None:
+        logger.error("--z-subsurface requires --z-surface and --d-bulk to be set")
+        raise SystemExit(1)
+
+    manual_regions = z_surface is not None
+    use_auto_layers = not manual_regions and not no_auto_layers
+    use_region_analysis = manual_regions or use_auto_layers
 
     # Print header
     logger.header("MLIP Plot", "Hydrogen Bond Analysis")
@@ -136,12 +165,20 @@ def hbond(
         "O-H cutoff": f"{o_h_cutoff} A",
         "Block averaging": f"{n_blocks} blocks",
     }
-    if use_region_analysis:
-        config["Region analysis"] = "[bold green]Enabled[/bold green]"
-        config["Interface thickness"] = f"{z_interface} A"
+    if manual_regions:
+        config["Region analysis"] = "[bold green]Manual[/bold green]"
+        config["Surface thickness"] = f"{z_surface} A"
+        if z_subsurface is not None:
+            config["Subsurface thickness"] = f"{z_subsurface} A"
         config["Bulk half-width"] = f"{d_bulk} A"
         config["Allow fraction"] = "[green]Yes[/green]" if allow_fraction else "[dim]No[/dim]"
         config["D-A inside"] = "[green]Yes[/green]" if da_inside else "[dim]No[/dim]"
+    elif use_auto_layers:
+        config["Region analysis"] = "[bold cyan]Auto-detect[/bold cyan]"
+        config["Allow fraction"] = "[green]Yes[/green]" if allow_fraction else "[dim]No[/dim]"
+        config["D-A inside"] = "[green]Yes[/green]" if da_inside else "[dim]No[/dim]"
+    else:
+        config["Region analysis"] = "[dim]Disabled (bulk only)[/dim]"
     config["Z profile bins"] = f"{n_bins}"
     config["Time step"] = f"{dt} ps"
     if save_hbonds:
@@ -251,8 +288,10 @@ def hbond(
         results = analyze_hbonds(
             frames, hbonds, waters,
             n_blocks=n_blocks,
-            z_interface=z_interface,
+            z_interface=z_surface,
             d_bulk=d_bulk,
+            z_subsurface=z_subsurface,
+            auto_layers=use_auto_layers,
             allow_fraction=allow_fraction,
             da_inside=da_inside,
             verbose=verbose
@@ -263,23 +302,19 @@ def hbond(
     # Display results
     bulk_stats = results['bulk']
 
-    if use_region_analysis:
+    if use_region_analysis and 'regions' in results:
+        from ..analysis.regions import get_display_label, ordered_region_names
         # Region-based results
         region_stats = results['regions']
         region_defs = results['region_definitions']
 
-        region_labels = {
-            'interface_a': 'Interface A (Lower)',
-            'interface_b': 'Interface B (Upper)',
-            'bulk': 'Bulk (Central)',
-        }
-
-        for region_name in ['interface_a', 'bulk', 'interface_b']:
+        for region_name in ordered_region_names(region_defs):
             if region_name in region_stats:
                 stats = region_stats[region_name]
                 z_range = region_defs[region_name]
+                label = get_display_label(region_name)
 
-                title = f"H-bonds: {region_labels[region_name]} ({z_range[0]:.1f}-{z_range[1]:.1f} A)"
+                title = f"H-bonds: {label} ({z_range[0]:.1f}-{z_range[1]:.1f} A)"
                 results_tbl = logger.results_table(title)
                 results_tbl.add_column("Metric", style="cyan")
                 results_tbl.add_column("Value", justify="right")
@@ -406,7 +441,8 @@ def hbond(
     logger.section("Exporting CSV")
 
     csv_file = f"{output_prefix}_stats.csv"
-    _export_stats_csv(results, use_region_analysis, n_blocks, da_cutoff, angle_cutoff, csv_file)
+    has_regions = 'regions' in results
+    _export_stats_csv(results, has_regions, n_blocks, da_cutoff, angle_cutoff, csv_file)
     logger.success(f"Saved: [bold]{csv_file}[/bold]")
 
     logger.complete()
@@ -431,8 +467,9 @@ def _export_stats_csv(results: dict, use_region_analysis: bool, n_blocks: int,
 
             region_stats = results['regions']
             region_defs = results['region_definitions']
+            from ..analysis.regions import ordered_region_names
 
-            for region_name in ['interface_a', 'bulk', 'interface_b']:
+            for region_name in ordered_region_names(region_defs):
                 if region_name in region_stats:
                     stats = region_stats[region_name]
                     z_range = region_defs[region_name]

@@ -286,56 +286,24 @@ def define_z_regions(
     z_interface: float,
     d_bulk: float,
     metal_surface_z: Optional[float] = None,
-    upper_metal_surface_z: Optional[float] = None
+    upper_metal_surface_z: Optional[float] = None,
+    z_subsurface: Optional[float] = None,
 ) -> Dict[str, Tuple[float, float]]:
+    """Thin wrapper around :func:`regions.define_manual_regions`.
+
+    ``z_interface`` plays the role of ``z_surface``. When ``z_subsurface`` is
+    omitted the legacy ``interface_a/interface_b/bulk`` scheme is returned.
     """
-    Define three z-regions for region-based diffusion analysis.
-
-    Parameters
-    ----------
-    z_lo : float
-        Lower z-boundary of simulation box
-    z_hi : float
-        Upper z-boundary of simulation box
-    z_interface : float
-        Thickness of interfacial region from each surface
-    d_bulk : float
-        Half-width of bulk region around midpoint
-    metal_surface_z : float, optional
-        Top of LOWER metal surface. If provided,
-        interface_a starts from this z-coordinate instead of z_lo.
-    upper_metal_surface_z : float, optional
-        Bottom of UPPER metal surface. If provided,
-        interface_b ends at this z-coordinate instead of z_hi.
-
-    Returns
-    -------
-    regions : dict
-        Dictionary with keys 'interface_a', 'interface_b', 'bulk',
-        each mapping to (z_min, z_max) tuple
-    """
-    # Interface A: starts from lower metal surface top if provided
-    if metal_surface_z is not None:
-        interface_a_start = metal_surface_z
-    else:
-        interface_a_start = z_lo
-
-    # Interface B: ends at upper metal surface bottom if provided
-    if upper_metal_surface_z is not None:
-        interface_b_end = upper_metal_surface_z
-    else:
-        interface_b_end = z_hi
-
-    # Compute midpoint of water region (between the two surfaces)
-    water_z_start = interface_a_start
-    water_z_end = interface_b_end
-    midpoint = (water_z_start + water_z_end) / 2.0
-
-    return {
-        'interface_a': (interface_a_start, interface_a_start + z_interface),
-        'interface_b': (interface_b_end - z_interface, interface_b_end),
-        'bulk': (midpoint - d_bulk, midpoint + d_bulk),
-    }
+    from .regions import define_manual_regions
+    return define_manual_regions(
+        z_lo=z_lo,
+        z_hi=z_hi,
+        z_surface=z_interface,
+        d_bulk=d_bulk,
+        z_subsurface=z_subsurface,
+        lower_metal_surface_z=metal_surface_z,
+        upper_metal_surface_z=upper_metal_surface_z,
+    )
 
 
 def get_atoms_in_region(
@@ -557,6 +525,8 @@ def calculate_msd(
     use_water_com: bool = False,
     z_interface: Optional[float] = None,
     d_bulk: Optional[float] = None,
+    z_subsurface: Optional[float] = None,
+    auto_layers: bool = False,
     unwrap_z: bool = False,
     verbose: bool = True,
     logger: Optional[Any] = None
@@ -604,7 +574,9 @@ def calculate_msd(
     # Validate z-region parameters
     if (z_interface is None) != (d_bulk is None):
         raise ValueError("z_interface and d_bulk must both be provided, or neither")
-    use_region_analysis = z_interface is not None
+    manual_regions = z_interface is not None
+    use_auto_layers = auto_layers and not manual_regions
+    use_region_analysis = manual_regions or use_auto_layers
 
     # Get box dimensions
     box = frames[0]['box']
@@ -617,13 +589,26 @@ def calculate_msd(
 
     # Define regions if region analysis is enabled
     regions = None
-    if use_region_analysis:
+    if use_auto_layers:
+        from .regions import define_auto_regions
+        try:
+            regions, _ = define_auto_regions(frames, verbose=verbose, logger=logger)
+        except ValueError as e:
+            if verbose:
+                _log(logger, 'warning', f"Auto-layer detection failed: {e}")
+                _log(logger, 'warning', "Falling back to global-only MSD")
+            regions = None
+            use_region_analysis = False
+    elif manual_regions:
         # Find metal surface z (auto-detects Cu or Pt)
         metal_surface_z, found_metals = find_metal_surface_z(frames)
         if verbose:
             _log(logger, 'info', f"Metal surface top at z = {metal_surface_z:.2f} A (detected: {found_metals})")
 
-        regions = define_z_regions(z_lo, z_hi, z_interface, d_bulk, metal_surface_z)
+        regions = define_z_regions(
+            z_lo, z_hi, z_interface, d_bulk, metal_surface_z,
+            z_subsurface=z_subsurface,
+        )
         if verbose:
             _log(logger, 'info', "Region-based analysis enabled")
             for region_name, (rz_min, rz_max) in regions.items():
@@ -857,6 +842,8 @@ def compute_diffusion(
     use_water_com: bool = True,
     z_interface: Optional[float] = None,
     d_bulk: Optional[float] = None,
+    z_subsurface: Optional[float] = None,
+    auto_layers: bool = False,
     fit_start_frac: float = 0.2,
     fit_end_frac: float = 0.9,
     fit_start_ps: Optional[float] = None,
@@ -932,6 +919,7 @@ def compute_diffusion(
         elements=elements,
         use_water_com=use_water_com,
         z_interface=z_interface, d_bulk=d_bulk,
+        z_subsurface=z_subsurface, auto_layers=auto_layers,
         unwrap_z=unwrap_z, verbose=verbose, logger=logger
     )
 
@@ -945,6 +933,7 @@ def compute_diffusion(
             elements=elements,
             use_water_com=use_water_com,
             z_interface=z_interface, d_bulk=d_bulk,
+            z_subsurface=z_subsurface, auto_layers=auto_layers,
             unwrap_z=unwrap_z, verbose=False
         )
 
@@ -1005,18 +994,18 @@ def compute_diffusion(
 
     if use_region_analysis:
         # Region-based analysis: fit for each region
-        region_labels = {
-            'interface_a': 'Interface A (Lower)',
-            'interface_b': 'Interface B (Upper)',
-            'bulk': 'Bulk (Central)'
-        }
+        from .regions import get_display_label
+        def _label_region(name: str) -> str:
+            if name == 'bulk':
+                return 'Bulk (Central)'
+            return get_display_label(name)
 
         for region_name in regions:
             diffusion_results[region_name] = {}
             region_msd = msd_data[region_name]
 
             if verbose:
-                _log(logger, 'section', f"Region: {region_labels.get(region_name, region_name)}")
+                _log(logger, 'section', f"Region: {_label_region(region_name)}")
 
             for diff_type, dim, label in [
                 ('planar', 2, 'Planar (x-y)'),

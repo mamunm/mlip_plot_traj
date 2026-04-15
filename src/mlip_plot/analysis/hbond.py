@@ -11,6 +11,7 @@ import numpy as np
 from ..utils.hbond import HydrogenBond
 from ..utils.water import WaterMolecule
 from .diffusion import find_metal_surfaces, SUPPORTED_METALS
+from .regions import define_manual_regions, define_auto_regions
 
 
 def _log(logger: Optional[Any], method: str, message: str, verbose: bool = True):
@@ -29,61 +30,23 @@ def define_z_regions_hbond(
     z_interface: float,
     d_bulk: float,
     lower_metal_surface_z: Optional[float] = None,
-    upper_metal_surface_z: Optional[float] = None
+    upper_metal_surface_z: Optional[float] = None,
+    z_subsurface: Optional[float] = None,
 ) -> Dict[str, Tuple[float, float]]:
+    """Thin wrapper around :func:`regions.define_manual_regions`.
+
+    ``z_interface`` plays the role of ``z_surface``. When ``z_subsurface`` is
+    omitted the legacy ``interface_a/interface_b/bulk`` scheme is returned.
     """
-    Define three z-regions for region-based H-bond analysis.
-
-    Parameters
-    ----------
-    z_lo : float
-        Lower z-boundary of simulation box
-    z_hi : float
-        Upper z-boundary of simulation box
-    z_interface : float
-        Thickness of interfacial region from each surface
-    d_bulk : float
-        Half-width of bulk region around midpoint
-    lower_metal_surface_z : float, optional
-        Top of LOWER metal surface (where water starts).
-        If None, uses z_lo.
-    upper_metal_surface_z : float, optional
-        Bottom of UPPER metal surface (where water ends).
-        If None, uses z_hi.
-
-    Returns
-    -------
-    regions : dict
-        Dictionary with keys 'interface_a', 'interface_b', 'bulk',
-        each mapping to (z_min, z_max) tuple
-
-    Notes
-    -----
-    Region definitions:
-    - interface_a: from lower_metal_surface_z to lower_metal_surface_z + z_interface
-    - interface_b: from upper_metal_surface_z - z_interface to upper_metal_surface_z
-    - bulk: midpoint +/- d_bulk (where midpoint is center of water region)
-    """
-    # Interface A: starts from top of lower metal surface
-    if lower_metal_surface_z is not None:
-        interface_a_start = lower_metal_surface_z
-    else:
-        interface_a_start = z_lo
-
-    # Interface B: ends at bottom of upper metal surface
-    if upper_metal_surface_z is not None:
-        interface_b_end = upper_metal_surface_z
-    else:
-        interface_b_end = z_hi
-
-    # Compute midpoint of water region (between the two surfaces)
-    midpoint = (interface_a_start + interface_b_end) / 2.0
-
-    return {
-        'interface_a': (interface_a_start, interface_a_start + z_interface),
-        'interface_b': (interface_b_end - z_interface, interface_b_end),
-        'bulk': (midpoint - d_bulk, midpoint + d_bulk),
-    }
+    return define_manual_regions(
+        z_lo=z_lo,
+        z_hi=z_hi,
+        z_surface=z_interface,
+        d_bulk=d_bulk,
+        z_subsurface=z_subsurface,
+        lower_metal_surface_z=lower_metal_surface_z,
+        upper_metal_surface_z=upper_metal_surface_z,
+    )
 
 
 def _get_water_z_positions(water: WaterMolecule) -> Tuple[float, float, float]:
@@ -558,6 +521,8 @@ def analyze_hbonds(
     n_blocks: int = 5,
     z_interface: Optional[float] = None,
     d_bulk: Optional[float] = None,
+    z_subsurface: Optional[float] = None,
+    auto_layers: bool = False,
     allow_fraction: bool = False,
     da_inside: bool = False,
     verbose: bool = True,
@@ -605,7 +570,9 @@ def analyze_hbonds(
     # Validate region parameters
     if (z_interface is None) != (d_bulk is None):
         raise ValueError("z_interface and d_bulk must both be provided, or neither")
-    use_region_analysis = z_interface is not None
+    manual_regions = z_interface is not None
+    use_auto_layers = auto_layers and not manual_regions
+    use_region_analysis = manual_regions or use_auto_layers
 
     if verbose:
         _log(logger, 'info', f"Analyzing {n_frames} frames with {n_waters} water molecules")
@@ -625,44 +592,62 @@ def analyze_hbonds(
     # Region-based analysis
     if use_region_analysis:
         if verbose:
-            _log(logger, 'info', "Performing region-based analysis...")
+            mode_str = "auto-detected" if use_auto_layers else "manual"
+            _log(logger, 'info', f"Performing region-based analysis ({mode_str})...")
 
-        # Get box dimensions
-        box = frames[0]['box']
-        z_lo = box['zlo']
-        z_hi = box['zhi']
+        regions = None
+        diagnostics = None
 
-        # Find metal surfaces (auto-detects Cu or Pt)
-        try:
-            lower_surface_z, upper_surface_z, found_metals = find_metal_surfaces(frames)
+        if use_auto_layers:
+            try:
+                regions, diagnostics = define_auto_regions(
+                    frames, verbose=verbose, logger=logger
+                )
+            except ValueError as e:
+                if verbose:
+                    _log(logger, 'warning', f"Auto-layer detection failed: {e}")
+                    _log(logger, 'warning', "Falling back to bulk-only analysis")
+                regions = None
+
+        else:
+            # Manual regions: determine metal surfaces for anchoring.
+            box = frames[0]['box']
+            z_lo = box['zlo']
+            z_hi = box['zhi']
+            try:
+                lower_surface_z, upper_surface_z, found_metals = find_metal_surfaces(frames)
+                if verbose:
+                    _log(logger, 'info', f"Metal surfaces detected: {found_metals}")
+                    _log(logger, 'detail', f"  Lower surface top: {lower_surface_z:.2f} A")
+                    if upper_surface_z is not None:
+                        _log(logger, 'detail', f"  Upper surface bottom: {upper_surface_z:.2f} A")
+            except ValueError:
+                if verbose:
+                    _log(logger, 'info', "No metal surfaces detected, using box boundaries")
+                lower_surface_z = None
+                upper_surface_z = None
+
+            regions = define_z_regions_hbond(
+                z_lo, z_hi, z_interface, d_bulk,
+                lower_metal_surface_z=lower_surface_z,
+                upper_metal_surface_z=upper_surface_z,
+                z_subsurface=z_subsurface,
+            )
+
             if verbose:
-                _log(logger, 'info', f"Metal surfaces detected: {found_metals}")
-                _log(logger, 'detail', f"  Lower surface top: {lower_surface_z:.2f} A")
-                if upper_surface_z is not None:
-                    _log(logger, 'detail', f"  Upper surface bottom: {upper_surface_z:.2f} A")
-        except ValueError:
-            if verbose:
-                _log(logger, 'info', "No metal surfaces detected, using box boundaries")
-            lower_surface_z = None
-            upper_surface_z = None
+                for region_name, (rz_min, rz_max) in regions.items():
+                    _log(logger, 'detail', f"  {region_name}: {rz_min:.2f} to {rz_max:.2f} A")
 
-        # Define regions
-        regions = define_z_regions_hbond(
-            z_lo, z_hi, z_interface, d_bulk,
-            lower_metal_surface_z=lower_surface_z,
-            upper_metal_surface_z=upper_surface_z
-        )
-
-        if verbose:
-            for region_name, (rz_min, rz_max) in regions.items():
-                _log(logger, 'detail', f"  {region_name}: {rz_min:.2f} to {rz_max:.2f} A")
-
-        # Compute region statistics
-        region_stats = compute_hbond_statistics_regions(
-            hbonds, waters, regions, n_blocks, allow_fraction, da_inside
-        )
-
-        results['regions'] = region_stats
-        results['region_definitions'] = regions
+        if regions is not None:
+            region_stats = compute_hbond_statistics_regions(
+                hbonds, waters, regions, n_blocks, allow_fraction, da_inside
+            )
+            results['regions'] = region_stats
+            results['region_definitions'] = regions
+            if diagnostics is not None:
+                results['layer_diagnostics'] = diagnostics
+                results['region_mode'] = 'auto'
+            else:
+                results['region_mode'] = 'manual'
 
     return results

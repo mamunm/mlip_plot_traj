@@ -2,20 +2,21 @@
 Water molecule reorientation analysis for MD trajectories.
 
 Computes orientation distributions P(cos θ) and P(cos φ) for water molecules
-relative to the surface normal, with support for region-based analysis
-(interface_a, bulk, interface_b).
+relative to the surface normal, with support for region-based analysis.
+Region definitions are shared with hbond/diffusion via
+``mlip_plot.analysis.regions``.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .diffusion import find_metal_surfaces, SUPPORTED_METALS
-
-try:
-    from scipy.ndimage import gaussian_filter1d
-    SCIPY_AVAILABLE = True
-except ImportError:
-    SCIPY_AVAILABLE = False
+from . import regions as regions_mod
+from .regions import (
+    define_manual_regions,
+    define_auto_regions,
+    detect_layer_boundaries,
+)
 
 
 def _log(logger: Optional[Any], method: str, message: str, verbose: bool = True):
@@ -34,276 +35,23 @@ def define_z_regions_reorientation(
     z_interface: float,
     d_bulk: float,
     lower_metal_surface_z: Optional[float] = None,
-    upper_metal_surface_z: Optional[float] = None
+    upper_metal_surface_z: Optional[float] = None,
+    z_subsurface: Optional[float] = None,
 ) -> Dict[str, Tuple[float, float]]:
+    """Thin wrapper around :func:`regions.define_manual_regions`.
+
+    ``z_interface`` plays the role of ``z_surface``. When ``z_subsurface`` is
+    ``None`` the legacy ``interface_a/interface_b/bulk`` scheme is returned.
     """
-    Define three z-regions for region-based orientation analysis.
-
-    Parameters
-    ----------
-    z_lo : float
-        Lower z-boundary of simulation box
-    z_hi : float
-        Upper z-boundary of simulation box
-    z_interface : float
-        Thickness of interfacial region from each surface
-    d_bulk : float
-        Half-width of bulk region around midpoint
-    lower_metal_surface_z : float, optional
-        Top of LOWER metal surface (where water starts).
-        If None, uses z_lo.
-    upper_metal_surface_z : float, optional
-        Bottom of UPPER metal surface (where water ends).
-        If None, uses z_hi.
-
-    Returns
-    -------
-    regions : dict
-        Dictionary with keys 'interface_a', 'interface_b', 'bulk',
-        each mapping to (z_min, z_max) tuple
-    """
-    if lower_metal_surface_z is not None:
-        interface_a_start = lower_metal_surface_z
-    else:
-        interface_a_start = z_lo
-
-    if upper_metal_surface_z is not None:
-        interface_b_end = upper_metal_surface_z
-    else:
-        interface_b_end = z_hi
-
-    midpoint = (interface_a_start + interface_b_end) / 2.0
-
-    return {
-        'interface_a': (interface_a_start, interface_a_start + z_interface),
-        'interface_b': (interface_b_end - z_interface, interface_b_end),
-        'bulk': (midpoint - d_bulk, midpoint + d_bulk),
-    }
-
-
-def detect_layer_boundaries(
-    frames: List[Dict],
-    z_surface: float,
-    z_max: float,
-    n_bins: int = 300,
-    sigma: float = 2.0,
-    verbose: bool = True,
-    logger: Optional[Any] = None
-) -> Dict[str, Any]:
-    """
-    Automatically detect water layer boundaries from oxygen density profile.
-
-    Follows the reference algorithm:
-    1. Calculate oxygen density profile from metal surface to z_max
-    2. Smooth with gaussian filter
-    3. Find first peak (surface layer maximum) within 6A of surface
-    4. Find first minimum after peak (surface layer end) within 4A of peak
-    5. Find second minimum (subsurface layer end) within 6A of first minimum
-
-    Parameters
-    ----------
-    frames : list of dict
-        Trajectory frames from read_lammpstrj
-    z_surface : float
-        Z-coordinate of metal surface (top of lower slab)
-    z_max : float
-        Maximum z-coordinate to analyze (middle of box)
-    n_bins : int
-        Number of bins for density histogram (default: 300)
-    sigma : float
-        Gaussian smoothing sigma (default: 2.0)
-    verbose : bool
-        Print detected boundaries
-    logger : optional
-        Logger instance for output
-
-    Returns
-    -------
-    boundaries : dict
-        Dictionary with keys:
-        - 'z_surface': metal surface z-coordinate
-        - 'z_surface_peak': z of first density peak
-        - 'z_surface_min': z of first minimum (surface/subsurface boundary)
-        - 'z_subsurface_min': z of second minimum (subsurface/bulk boundary)
-        - 'bin_centers': array of bin centers
-        - 'density': raw density histogram
-        - 'density_smooth': smoothed density profile
-
-    Raises
-    ------
-    ValueError
-        If scipy is not available or required peaks/minima cannot be detected
-    """
-    if not SCIPY_AVAILABLE:
-        raise ValueError("scipy is required for auto-layer detection (gaussian_filter1d)")
-
-    # 1. Build histogram of oxygen z-coordinates
-    # Extend slightly below surface and up to z_max (or 20A from surface, whichever is smaller)
-    z_upper = min(z_surface + 20, z_max)
-    bins = np.linspace(z_surface - 1, z_upper, n_bins)
-    bin_centers = (bins[:-1] + bins[1:]) / 2
-    bin_width = bin_centers[1] - bin_centers[0]
-    hist = np.zeros(len(bins) - 1)
-
-    # Get elements array
-    elements = frames[0].get('elements')
-    if elements is None:
-        raise ValueError("Frames must contain element information for auto-layer detection")
-
-    # Find O atoms and accumulate histogram
-    for frame in frames:
-        positions = frame['positions']
-        frame_elements = frame['elements']
-
-        # Find oxygen atoms
-        for i, elem in enumerate(frame_elements):
-            if elem == 'O':
-                z = positions[i, 2]
-                idx = np.searchsorted(bins, z) - 1
-                if 0 <= idx < len(hist):
-                    hist[idx] += 1
-
-    # Normalize by number of frames and bin width
-    hist = hist / len(frames) / bin_width
-
-    # 2. Smooth with gaussian filter
-    hist_smooth = gaussian_filter1d(hist, sigma=sigma)
-
-    # 3. Find first peak (surface layer maximum) within 6A of surface
-    search_region = (bin_centers >= z_surface) & (bin_centers < z_surface + 6)
-    if not np.any(search_region):
-        raise ValueError(f"No density data found near surface (z={z_surface:.2f})")
-
-    search_idx = np.where(search_region)[0]
-    peak_local_idx = np.argmax(hist_smooth[search_region])
-    z_surface_peak = bin_centers[search_idx[peak_local_idx]]
-
-    if verbose:
-        _log(logger, 'detail', f"  Surface layer peak: z = {z_surface_peak:.2f} A")
-
-    # 4. Find first minimum after peak within 4A of peak
-    search_region = (bin_centers > z_surface_peak) & (bin_centers < z_surface_peak + 4)
-    if not np.any(search_region):
-        raise ValueError(f"Cannot find minimum after surface peak at z={z_surface_peak:.2f}")
-
-    search_idx = np.where(search_region)[0]
-    min1_local_idx = np.argmin(hist_smooth[search_region])
-    z_surface_min = bin_centers[search_idx[min1_local_idx]]
-
-    if verbose:
-        _log(logger, 'detail', f"  Surface/subsurface boundary: z = {z_surface_min:.2f} A")
-
-    # 5. Find second minimum within 6A after first minimum
-    # Skip first 1A to avoid local noise
-    search_region = (bin_centers > z_surface_min + 1.0) & (bin_centers < z_surface_min + 6)
-    if not np.any(search_region):
-        # If no second minimum found, use midpoint between z_surface_min and z_max
-        z_subsurface_min = (z_surface_min + z_max) / 2
-        if verbose:
-            _log(logger, 'warning', f"  No second minimum found, using midpoint: z = {z_subsurface_min:.2f} A")
-    else:
-        search_idx = np.where(search_region)[0]
-        min2_local_idx = np.argmin(hist_smooth[search_region])
-        z_subsurface_min = bin_centers[search_idx[min2_local_idx]]
-        if verbose:
-            _log(logger, 'detail', f"  Subsurface/bulk boundary: z = {z_subsurface_min:.2f} A")
-
-    return {
-        'z_surface': z_surface,
-        'z_surface_peak': z_surface_peak,
-        'z_surface_min': z_surface_min,
-        'z_subsurface_min': z_subsurface_min,
-        'bin_centers': bin_centers,
-        'density': hist,
-        'density_smooth': hist_smooth,
-    }
-
-
-def define_auto_regions(
-    frames: List[Dict],
-    verbose: bool = True,
-    logger: Optional[Any] = None
-) -> Tuple[Dict[str, Tuple[float, float]], Dict[str, Any]]:
-    """
-    Automatically define water regions based on oxygen density profile.
-
-    Detects surface, subsurface, and bulk layers from the lower metal surface
-    toward the middle of the simulation box.
-
-    Parameters
-    ----------
-    frames : list of dict
-        Trajectory frames
-    verbose : bool
-        Print progress
-    logger : optional
-        Logger instance
-
-    Returns
-    -------
-    regions : dict
-        Dictionary mapping region names to (z_min, z_max) tuples:
-        - 'surface': surface layer at lower interface
-        - 'subsurface': subsurface layer at lower interface
-        - 'bulk': bulk water region (from subsurface end to box midpoint)
-    diagnostics : dict
-        Contains density profiles and detected boundaries for plotting
-    """
-    # Get box dimensions
-    box = frames[0]['box']
-    z_lo = box['zlo']
-    z_hi = box['zhi']
-    z_mid = (z_lo + z_hi) / 2.0
-
-    # Find metal surfaces
-    try:
-        lower_surface_z, upper_surface_z, found_metals = find_metal_surfaces(frames)
-        if verbose:
-            _log(logger, 'info', f"Metal surfaces detected: {found_metals}")
-            _log(logger, 'detail', f"  Lower surface top: {lower_surface_z:.2f} A")
-            if upper_surface_z is not None:
-                _log(logger, 'detail', f"  Upper surface bottom: {upper_surface_z:.2f} A")
-                # For sandwich systems, use the region between metal surfaces
-                z_mid = (lower_surface_z + upper_surface_z) / 2.0
-    except ValueError:
-        if verbose:
-            _log(logger, 'warning', "No metal surfaces detected, using box z_lo as surface")
-        lower_surface_z = z_lo
-        upper_surface_z = None
-
-    # Detect layer boundaries from O density profile
-    if verbose:
-        _log(logger, 'info', "Detecting layer boundaries from O density profile...")
-
-    boundaries = detect_layer_boundaries(
-        frames,
-        z_surface=lower_surface_z,
-        z_max=z_mid,
-        verbose=verbose,
-        logger=logger
+    return define_manual_regions(
+        z_lo=z_lo,
+        z_hi=z_hi,
+        z_surface=z_interface,
+        d_bulk=d_bulk,
+        z_subsurface=z_subsurface,
+        lower_metal_surface_z=lower_metal_surface_z,
+        upper_metal_surface_z=upper_metal_surface_z,
     )
-
-    # Define regions
-    regions = {
-        'surface': (lower_surface_z, boundaries['z_surface_min']),
-        'subsurface': (boundaries['z_surface_min'], boundaries['z_subsurface_min']),
-        'bulk': (boundaries['z_subsurface_min'], z_mid),
-    }
-
-    if verbose:
-        _log(logger, 'info', "Auto-detected regions:")
-        for region_name, (rz_min, rz_max) in regions.items():
-            _log(logger, 'detail', f"  {region_name}: {rz_min:.2f} to {rz_max:.2f} A")
-
-    # Store diagnostics for plotting
-    diagnostics = {
-        'boundaries': boundaries,
-        'z_mid': z_mid,
-        'lower_surface_z': lower_surface_z,
-        'upper_surface_z': upper_surface_z,
-    }
-
-    return regions, diagnostics
 
 
 def filter_orientations_by_region(
@@ -527,6 +275,7 @@ def analyze_reorientation(
     n_blocks: int = 5,
     z_interface: Optional[float] = None,
     d_bulk: Optional[float] = None,
+    z_subsurface: Optional[float] = None,
     auto_layers: bool = True,
     verbose: bool = True,
     logger: Optional[Any] = None
@@ -629,7 +378,8 @@ def analyze_reorientation(
         regions = define_z_regions_reorientation(
             z_lo, z_hi, z_interface, d_bulk,
             lower_metal_surface_z=lower_surface_z,
-            upper_metal_surface_z=upper_surface_z
+            upper_metal_surface_z=upper_surface_z,
+            z_subsurface=z_subsurface,
         )
 
         if verbose:

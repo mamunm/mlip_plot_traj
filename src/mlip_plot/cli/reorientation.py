@@ -27,10 +27,16 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeEl
 @click.option('--n-blocks', default=5, type=int,
               help='Number of blocks for error estimation (default: 5)')
 # Region options (metal-water interface)
+@click.option('--z-surface', default=None, type=float,
+              help='Surface-layer thickness from each metal surface (Angstroms). Requires --d-bulk. '
+                   'Manual mode. Pair with --z-subsurface for surface/subsurface/bulk split.')
+@click.option('--z-subsurface', default=None, type=float,
+              help='Subsurface-layer thickness (Angstroms). Optional. When provided, manual regions become '
+                   'surface / subsurface / bulk; when omitted, legacy interface_a / interface_b / bulk.')
 @click.option('--z-interface', default=None, type=float,
-              help='Interface thickness from each surface (Angstroms). Requires --d-bulk. For manual region mode.')
+              help='[DEPRECATED] Alias for --z-surface.')
 @click.option('--d-bulk', default=None, type=float,
-              help='Half-width of bulk region around midpoint (Angstroms). Requires --z-interface. For manual region mode.')
+              help='Half-width of bulk region around midpoint (Angstroms).')
 @click.option('--no-auto-layers', is_flag=True,
               help='Disable automatic layer detection (compute global only when no region params given)')
 # Output options
@@ -56,6 +62,8 @@ def reorientation(
     no_z_pbc: bool,
     n_bins: int,
     n_blocks: int,
+    z_surface: Optional[float],
+    z_subsurface: Optional[float],
     z_interface: Optional[float],
     d_bulk: Optional[float],
     no_auto_layers: bool,
@@ -82,28 +90,19 @@ def reorientation(
 
     \b
     Region analysis modes:
-    1. Auto-detect (default): Automatically detects surface, subsurface, and
-       bulk layers from oxygen density profile when no region params given.
-    2. Manual (--z-interface and --d-bulk): User-specified regions.
-    3. Global only (--no-auto-layers): Only compute global distributions.
-
-    \b
-    Auto-detected regions (default):
-    - Surface: From metal surface to first O density minimum
-    - Subsurface: From first to second O density minimum
-    - Bulk: From second minimum to middle of box
-
-    \b
-    Manual regions (--z-interface and --d-bulk):
-    - Interface A: From lower metal surface to z_interface
-    - Interface B: From upper boundary - z_interface to upper boundary
-    - Bulk: midpoint +/- d_bulk
+    1. Auto-detect (default): surface / subsurface / bulk from the O density
+       profile. Disable with --no-auto-layers.
+    2. Manual --z-surface + --d-bulk (legacy naming):
+       interface_a / interface_b / bulk.
+    3. Manual --z-surface + --z-subsurface + --d-bulk:
+       surface / subsurface / bulk.
 
     \b
     Examples:
       mlip-plot reorientation trajectory.lammpstrj
       mlip-plot reorientation trajectory.lammpstrj --n-bins 100 -v
-      mlip-plot reorientation trajectory.lammpstrj --z-interface 5.0 --d-bulk 10.0
+      mlip-plot reorientation trajectory.lammpstrj --z-surface 5 --d-bulk 10
+      mlip-plot reorientation trajectory.lammpstrj --z-surface 3 --z-subsurface 3 --d-bulk 10
       mlip-plot reorientation trajectory.lammpstrj --no-auto-layers
     """
     from ..io.lammps import read_lammpstrj
@@ -129,13 +128,25 @@ def reorientation(
         output_prefix = save_path / output
     output_prefix = str(output_prefix)
 
-    # Validate region parameters
-    if (z_interface is None) != (d_bulk is None):
-        logger.error("--z-interface and --d-bulk must both be provided, or neither")
+    # Resolve deprecated alias
+    if z_interface is not None:
+        if z_surface is None:
+            z_surface = z_interface
+            logger.warning("[deprecated] --z-interface is an alias for --z-surface; please migrate.")
+        else:
+            logger.error("Specify either --z-surface or --z-interface, not both")
+            raise SystemExit(1)
+
+    # Validate manual-region coupling
+    if (z_surface is None) != (d_bulk is None):
+        logger.error("--z-surface (or --z-interface) and --d-bulk must both be provided, or neither")
+        raise SystemExit(1)
+    if z_subsurface is not None and z_surface is None:
+        logger.error("--z-subsurface requires --z-surface and --d-bulk to be set")
         raise SystemExit(1)
 
     # Determine region analysis mode
-    manual_regions = z_interface is not None
+    manual_regions = z_surface is not None
     auto_layers_enabled = not manual_regions and not no_auto_layers
 
     # Print header
@@ -152,7 +163,9 @@ def reorientation(
     }
     if manual_regions:
         config["Region analysis"] = "[bold green]Manual[/bold green]"
-        config["Interface thickness"] = f"{z_interface} Å"
+        config["Surface thickness"] = f"{z_surface} Å"
+        if z_subsurface is not None:
+            config["Subsurface thickness"] = f"{z_subsurface} Å"
         config["Bulk half-width"] = f"{d_bulk} Å"
     elif auto_layers_enabled:
         config["Region analysis"] = "[bold cyan]Auto-detect[/bold cyan]"
@@ -287,8 +300,9 @@ def reorientation(
             frames, orientations,
             n_bins=n_bins,
             n_blocks=n_blocks,
-            z_interface=z_interface,
+            z_interface=z_surface,
             d_bulk=d_bulk,
+            z_subsurface=z_subsurface,
             auto_layers=auto_layers_enabled,
             verbose=verbose,
             logger=logger
@@ -301,23 +315,13 @@ def reorientation(
     phi_data = results['phi']
     region_mode = results.get('region_mode', 'global')
 
-    # Region labels for display
-    region_labels = {
-        # Manual regions
-        'interface_a': 'Interface A (Lower)',
-        'interface_b': 'Interface B (Upper)',
-        # Auto-detected regions
-        'surface': 'Surface',
-        'subsurface': 'Subsurface',
-        'bulk': 'Bulk',
-        'global': 'Global',
-    }
+    from ..analysis.regions import get_display_label, ordered_region_names
+    region_labels = {name: get_display_label(name) for name in ['interface_a', 'interface_b', 'surface', 'subsurface', 'bulk', 'global']}
 
     # Determine which regions to display based on mode
-    if region_mode == 'manual':
-        regions_order = ['interface_a', 'bulk', 'interface_b']
-    elif region_mode == 'auto':
-        regions_order = ['surface', 'subsurface', 'bulk']
+    region_defs_display = results.get('regions') or {}
+    if region_mode in ('manual', 'auto') and region_defs_display:
+        regions_order = ordered_region_names(region_defs_display)
     else:
         regions_order = []
 
@@ -394,10 +398,8 @@ def reorientation(
     logger.section("Generating plots")
 
     # Determine which regions to plot
-    if region_mode == 'manual':
-        regions_to_plot = ['interface_a', 'bulk', 'interface_b']
-    elif region_mode == 'auto':
-        regions_to_plot = ['surface', 'subsurface', 'bulk']
+    if region_mode in ('manual', 'auto') and region_defs_display:
+        regions_to_plot = ordered_region_names(region_defs_display)
     else:
         regions_to_plot = ['global']
 

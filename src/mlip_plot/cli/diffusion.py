@@ -21,10 +21,18 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeEl
               help='Time between frames in picoseconds (default: 1.0)')
 @click.option('--elements', '-e', multiple=True, default=None,
               help='Elements to analyze (e.g., -e O -e H). Default: water COM')
+@click.option('--z-surface', default=None, type=float,
+              help='Surface-layer thickness from each metal surface (Angstroms). Requires --d-bulk. '
+                   'Manual mode. Pair with --z-subsurface for surface/subsurface/bulk split.')
+@click.option('--z-subsurface', default=None, type=float,
+              help='Subsurface-layer thickness (Angstroms). Optional. When provided, manual regions become '
+                   'surface / subsurface / bulk; when omitted, legacy interface_a / interface_b / bulk.')
 @click.option('--z-interface', default=None, type=float,
-              help='Interface thickness from each surface (Angstroms). Requires --d-bulk.')
+              help='[DEPRECATED] Alias for --z-surface.')
 @click.option('--d-bulk', default=None, type=float,
-              help='Half-width of bulk region around midpoint (Angstroms). Requires --z-interface.')
+              help='Half-width of bulk region around midpoint (Angstroms).')
+@click.option('--no-auto-layers', is_flag=True,
+              help='Disable automatic layer detection (compute global only when no manual region given).')
 @click.option('--fit-start-frac', default=0.2, type=float,
               help='Start fraction for fitting (default: 0.2)')
 @click.option('--fit-end-frac', default=0.9, type=float,
@@ -46,8 +54,11 @@ def diffusion(
     skip_frames: Optional[Union[int, float]],
     dt: float,
     elements: Tuple[str, ...],
+    z_surface: Optional[float],
+    z_subsurface: Optional[float],
     z_interface: Optional[float],
     d_bulk: Optional[float],
+    no_auto_layers: bool,
     fit_start_frac: float,
     fit_end_frac: float,
     n_blocks: int,
@@ -67,16 +78,19 @@ def diffusion(
     Use -e/--elements to analyze specific atoms instead.
 
     \b
-    Region analysis (--z-interface and --d-bulk):
-    Computes separate diffusion coefficients for three regions:
-    - Interface A: 0 to z_interface
-    - Interface B: z_length - z_interface to z_length
-    - Bulk: midpoint +/- d_bulk
+    Region analysis:
+    1. Auto-detect (default): surface / subsurface / bulk from the O density
+       profile. Disable with --no-auto-layers.
+    2. Manual --z-surface + --d-bulk (legacy naming):
+       interface_a / interface_b / bulk.
+    3. Manual --z-surface + --z-subsurface + --d-bulk:
+       surface / subsurface / bulk.
 
     \b
     Examples:
       mlip-plot diffusion trajectory.lammpstrj --dt 2.0
-      mlip-plot diffusion trajectory.lammpstrj --z-interface 20 --d-bulk 10
+      mlip-plot diffusion trajectory.lammpstrj --z-surface 20 --d-bulk 10
+      mlip-plot diffusion trajectory.lammpstrj --z-surface 3 --z-subsurface 3 --d-bulk 10
       mlip-plot diffusion trajectory.lammpstrj -e O
       mlip-plot diffusion trajectory.lammpstrj -e Na -e Cl
     """
@@ -108,11 +122,26 @@ def diffusion(
     elements_set = set(elements) if elements else None
     use_water_com = elements_set is None
 
-    # Validate region parameters
-    if (z_interface is None) != (d_bulk is None):
-        logger.error("--z-interface and --d-bulk must both be provided, or neither")
+    # Resolve deprecated alias
+    if z_interface is not None:
+        if z_surface is None:
+            z_surface = z_interface
+            logger.warning("[deprecated] --z-interface is an alias for --z-surface; please migrate.")
+        else:
+            logger.error("Specify either --z-surface or --z-interface, not both")
+            raise SystemExit(1)
+
+    # Validate manual-region coupling
+    if (z_surface is None) != (d_bulk is None):
+        logger.error("--z-surface (or --z-interface) and --d-bulk must both be provided, or neither")
         raise SystemExit(1)
-    use_region_analysis = z_interface is not None
+    if z_subsurface is not None and z_surface is None:
+        logger.error("--z-subsurface requires --z-surface and --d-bulk to be set")
+        raise SystemExit(1)
+
+    manual_regions = z_surface is not None
+    use_auto_layers = not manual_regions and not no_auto_layers
+    use_region_analysis = manual_regions or use_auto_layers
 
     # Print header
     logger.header("MLIP Plot", "Diffusion Coefficient Analysis")
@@ -125,10 +154,16 @@ def diffusion(
         "Time step": f"{dt} ps",
         "Analysis mode": "[bold green]Water COM[/bold green]" if use_water_com else f"Atoms: {', '.join(sorted(elements))}",
     }
-    if use_region_analysis:
-        config["Region analysis"] = "[bold green]Enabled[/bold green]"
-        config["Interface thickness"] = f"{z_interface} A"
+    if manual_regions:
+        config["Region analysis"] = "[bold green]Manual[/bold green]"
+        config["Surface thickness"] = f"{z_surface} A"
+        if z_subsurface is not None:
+            config["Subsurface thickness"] = f"{z_subsurface} A"
         config["Bulk half-width"] = f"{d_bulk} A"
+    elif use_auto_layers:
+        config["Region analysis"] = "[bold cyan]Auto-detect[/bold cyan]"
+    else:
+        config["Region analysis"] = "[dim]Disabled (global only)[/dim]"
     config["Fit range"] = f"{fit_start_frac*100:.0f}% - {fit_end_frac*100:.0f}%"
     config["Block averaging"] = f"{n_blocks} blocks" if n_blocks > 1 else "Disabled"
 
@@ -201,7 +236,8 @@ def diffusion(
             frames, dt,
             elements=elements_set,
             use_water_com=use_water_com,
-            z_interface=z_interface, d_bulk=d_bulk,
+            z_interface=z_surface, d_bulk=d_bulk,
+            z_subsurface=z_subsurface, auto_layers=use_auto_layers,
             fit_start_frac=fit_start_frac, fit_end_frac=fit_end_frac,
             unwrap_z=False, n_blocks=n_blocks, verbose=verbose
         )
@@ -211,6 +247,8 @@ def diffusion(
     msd_data = results['msd']
     diffusion_results = results['diffusion']
     regions = results.get('regions')
+    # If auto-detection was requested but failed, fall back to global-only display
+    has_regions = regions is not None
 
     particle_type = "water molecules" if use_water_com else "atoms"
     logger.success(f"MSD computed for {results['n_particles']} {particle_type}")
@@ -218,31 +256,33 @@ def diffusion(
     # Results table(s)
     use_blocks = n_blocks > 1
 
-    if use_region_analysis:
+    if has_regions:
         # Region-based results: create a table for each region
-        region_labels = {
-            'interface_a': 'Interface A (Lower)',
-            'interface_b': 'Interface B (Upper)',
-            'bulk': 'Bulk (Central)',
-            'global': 'Global (Whole System)'
-        }
+        from ..analysis.regions import get_display_label, ordered_region_names
+        def _label(name):
+            if name == 'bulk':
+                return 'Bulk (Central)'
+            if name == 'global':
+                return 'Global (Whole System)'
+            return get_display_label(name)
         type_labels = {
             'planar': 'Planar (x-y)',
             'perpendicular': 'Perpendicular (z)',
             'total': 'Total (3D)'
         }
 
-        for region_name in ['interface_a', 'bulk', 'interface_b', 'global']:
+        display_order = ordered_region_names(regions) + ['global']
+        for region_name in display_order:
             if region_name in diffusion_results:
                 region_diff = diffusion_results[region_name]
 
                 # Global doesn't have z_range in regions dict
                 if region_name == 'global':
                     box = frames[0]['box']
-                    title = f"Diffusion: {region_labels[region_name]} ({box['zlo']:.1f}-{box['zhi']:.1f} A)"
+                    title = f"Diffusion: {_label(region_name)} ({box['zlo']:.1f}-{box['zhi']:.1f} A)"
                 else:
                     z_range = regions[region_name]
-                    title = f"Diffusion: {region_labels[region_name]} ({z_range[0]:.1f}-{z_range[1]:.1f} A)"
+                    title = f"Diffusion: {_label(region_name)} ({z_range[0]:.1f}-{z_range[1]:.1f} A)"
 
                 results_tbl = logger.results_table(title)
                 results_tbl.add_column("Type", style="cyan")
@@ -314,7 +354,7 @@ def diffusion(
     # Create plots
     logger.section("Creating plots")
 
-    if use_region_analysis:
+    if has_regions:
         # Region-based plots
         output_file = f"{output_prefix}_msd_regions.png"
         plot_msd_regions(
@@ -355,7 +395,7 @@ def diffusion(
     logger.section("Exporting CSV")
 
     csv_file = f"{output_prefix}_msd.csv"
-    _export_msd_csv(msd_data, csv_file, use_region_analysis)
+    _export_msd_csv(msd_data, csv_file, has_regions)
     logger.success(f"Saved: [bold]{csv_file}[/bold]")
 
     csv_file = f"{output_prefix}_diffusion.csv"
@@ -377,27 +417,30 @@ def _export_msd_csv(msd_data: dict, output_file: str, use_region_analysis: bool 
             first_region = list(msd_data.keys())[0]
             time = msd_data[first_region]['planar'][0]
 
-            # Header with all region columns
+            # Region columns ordered by z (regions present in msd_data), plus 'global' last.
+            region_cols = [r for r in msd_data.keys() if r != 'global']
+            region_cols.sort(key=lambda r: msd_data[r].get('z_range', (0,))[0]
+                             if isinstance(msd_data[r], dict) and 'z_range' in msd_data[r] else 0)
+            if 'global' in msd_data:
+                region_cols.append('global')
+
             header = ['time_ps']
-            for region in ['interface_a', 'bulk', 'interface_b', 'global']:
-                if region in msd_data:
-                    header.extend([
-                        f'{region}_planar_A2',
-                        f'{region}_perp_A2',
-                        f'{region}_total_A2'
-                    ])
+            for region in region_cols:
+                header.extend([
+                    f'{region}_planar_A2',
+                    f'{region}_perp_A2',
+                    f'{region}_total_A2'
+                ])
             writer.writerow(header)
 
-            # Data rows
             for i in range(len(time)):
                 row = [f'{time[i]:.4f}']
-                for region in ['interface_a', 'bulk', 'interface_b', 'global']:
-                    if region in msd_data:
-                        row.extend([
-                            f'{msd_data[region]["planar"][1][i]:.6f}',
-                            f'{msd_data[region]["perpendicular"][1][i]:.6f}',
-                            f'{msd_data[region]["total"][1][i]:.6f}'
-                        ])
+                for region in region_cols:
+                    row.extend([
+                        f'{msd_data[region]["planar"][1][i]:.6f}',
+                        f'{msd_data[region]["perpendicular"][1][i]:.6f}',
+                        f'{msd_data[region]["total"][1][i]:.6f}'
+                    ])
                 writer.writerow(row)
         else:
             # Standard format
@@ -430,12 +473,13 @@ def _export_diffusion_csv(diffusion_results: dict, use_water_com: bool,
         else:
             writer.writerow([f'# Mode: Individual atoms ({", ".join(sorted(elements))})'])
         if use_region_analysis:
-            writer.writerow([f'# Region analysis: z_interface={z_interface} A, d_bulk={d_bulk} A'])
+            writer.writerow([f'# Region analysis: z_surface={z_interface} A, d_bulk={d_bulk} A'])
         if use_blocks:
             writer.writerow([f'# Block averaging: {n_blocks} blocks'])
         writer.writerow([])
 
         if use_region_analysis:
+            from ..analysis.regions import ordered_region_names
             # Region-based format
             header = ['region', 'type', 'D_A2_ps', 'D_cm2_s']
             if use_blocks:
@@ -443,7 +487,8 @@ def _export_diffusion_csv(diffusion_results: dict, use_water_com: bool,
             header.extend(['r_squared', 'fit_start_ps', 'fit_end_ps', 'n_points'])
             writer.writerow(header)
 
-            for region_name in ['interface_a', 'bulk', 'interface_b', 'global']:
+            region_order = ordered_region_names(regions) + ['global']
+            for region_name in region_order:
                 if region_name in diffusion_results:
                     region_diff = diffusion_results[region_name]
                     for diff_type in ['planar', 'perpendicular', 'total']:

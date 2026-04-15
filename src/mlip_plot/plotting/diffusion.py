@@ -351,17 +351,23 @@ def plot_msd_comparison(
     return output_file
 
 
-REGION_COLORS = {
-    'interface_a': '#da4a64',   # Red/Pink
-    'interface_b': '#6181ad',   # Blue
-    'bulk': '#226556',          # Dark green/teal
-}
+from ..analysis.regions import (
+    REGION_COLORS as _SHARED_REGION_COLORS,
+    get_display_label as _get_display_label,
+    ordered_region_names as _ordered_region_names,
+)
 
-REGION_LABELS = {
-    'interface_a': 'Interface A (Lower)',
-    'interface_b': 'Interface B (Upper)',
-    'bulk': 'Bulk (Central)',
-}
+
+def _region_color(name: str) -> str:
+    if name == 'bulk':
+        return '#226556'
+    return _SHARED_REGION_COLORS.get(name, '#000000')
+
+
+def _region_label(name: str) -> str:
+    if name == 'bulk':
+        return 'Bulk (Central)'
+    return _get_display_label(name)
 
 
 def plot_msd_regions(
@@ -410,10 +416,13 @@ def plot_msd_regions(
     output_file : str
         Path to saved figure
     """
-    region_order = ['interface_a', 'bulk', 'interface_b']
+    region_order = _ordered_region_names(regions)
     msd_types = ['planar', 'perpendicular', 'total']
 
-    fig, axes = plt.subplots(3, 3, figsize=(14, 12))
+    n_regions = max(len(region_order), 1)
+    fig, axes = plt.subplots(n_regions, 3, figsize=(14, 4 * n_regions))
+    if n_regions == 1:
+        axes = np.array([axes])
 
     type_titles = {
         'planar': 'Planar (x-y)',
@@ -428,7 +437,7 @@ def plot_msd_regions(
         region_msd = msd_data[region_name]
         region_diff = diffusion_results.get(region_name, {})
         z_range = regions.get(region_name, (0, 0))
-        color = REGION_COLORS.get(region_name, '#000000')
+        color = _region_color(region_name)
 
         for col_idx, msd_type in enumerate(msd_types):
             ax = axes[row_idx, col_idx]
@@ -481,10 +490,10 @@ def plot_msd_regions(
                 )
 
             # Labels
-            if row_idx == 2:  # Bottom row
+            if row_idx == n_regions - 1:  # Bottom row
                 ax.set_xlabel('Time (ps)', fontsize=11, fontweight='bold')
             if col_idx == 0:  # Left column
-                ax.set_ylabel(f'{REGION_LABELS[region_name]}\n({z_range[0]:.1f}-{z_range[1]:.1f} Å)\nMSD (Ų)',
+                ax.set_ylabel(f'{_region_label(region_name)}\n({z_range[0]:.1f}-{z_range[1]:.1f} Å)\nMSD (Ų)',
                               fontsize=10, fontweight='bold')
             if row_idx == 0:  # Top row
                 ax.set_title(type_titles[msd_type], fontsize=12, fontweight='bold')
@@ -539,7 +548,7 @@ def plot_diffusion_regions_summary(
     output_file : str
         Path to saved figure
     """
-    region_order = ['interface_a', 'bulk', 'interface_b']
+    region_order = _ordered_region_names(regions)
     msd_types = ['planar', 'total']  # Skip perpendicular (usually ~0)
 
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -586,7 +595,7 @@ def plot_diffusion_regions_summary(
     x_labels = []
     for region_name in region_order:
         z_range = regions.get(region_name, (0, 0))
-        x_labels.append(f'{REGION_LABELS[region_name]}\n({z_range[0]:.1f}-{z_range[1]:.1f} Å)')
+        x_labels.append(f'{_region_label(region_name)}\n({z_range[0]:.1f}-{z_range[1]:.1f} Å)')
 
     ax.set_xlabel('Region', fontsize=12, fontweight='bold')
     ax.set_ylabel(r'D ($\AA^2$/ps)', fontsize=12, fontweight='bold')
